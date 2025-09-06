@@ -1,0 +1,24 @@
+# Игнорировать виртуальное окружение
+.venv/
+
+# Игнорировать файлы среды
+.env
+
+# Кэш Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Логи
+*.log
+
+# IDE
+.vscode/
+.idea/
+
+# Временные файлы
+*.tmp
+*.temp
+.DS_Store
+Thumbs.db

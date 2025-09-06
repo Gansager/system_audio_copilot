@@ -1,0 +1,9 @@
+# Скопируйте этот файл в .env и заполните своими данными
+
+# OpenAI API Configuration
+OPENAI_API_KEY=sk-your-openai-api-key-here
+
+# Model Configuration
+MODEL_TRANSCRIBE=whisper-1
+MODEL_HINTS=gpt-4o-mini
+TEMPERATURE=0.2
