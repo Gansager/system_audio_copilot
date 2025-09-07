@@ -169,6 +169,23 @@ def main():
         action="store_true",
         help="Не печатать live транскрипцию, только накапливать для Enter"
     )
+    parser.add_argument(
+        "--loopback",
+        action="store_true",
+        help="Захват через WASAPI loopback (слушать устройство вывода, что слышите вы)"
+    )
+    parser.add_argument(
+        "--output-device",
+        type=str,
+        default=None,
+        help="Имя устройства вывода для loopback (подстрока, например: 'Headphones')"
+    )
+    parser.add_argument(
+        "--input-index",
+        type=int,
+        default=None,
+        help="Явный индекс входного устройства (PyAudio) для захвата. Полезно для выбора [Loopback]"
+    )
     
     args = parser.parse_args()
     
@@ -180,11 +197,22 @@ def main():
     print(f"[info] Интервал транскрибации: {args.window_sec} сек", file=sys.stderr)
     print(f"[info] Частота дискретизации: {args.samplerate} Гц", file=sys.stderr)
     print(f"[info] Режим: {'только по Enter' if args.enter_only else 'живая транскрипция'}", file=sys.stderr)
+    if args.loopback:
+        print(f"[info] Источник звука: WASAPI loopback", file=sys.stderr)
+        if args.output_device:
+            print(f"[info] Устройство вывода для loopback: {args.output_device}", file=sys.stderr)
+    else:
+        print(f"[info] Источник звука: устройство записи (микрофон/микшер)", file=sys.stderr)
     print(f"[info] Нажмите Enter для получения подсказки от AI, Ctrl+C для выхода", file=sys.stderr)
     print("=" * 60, file=sys.stderr)
     
     # Инициализируем слушатель аудио
-    audio_listener = SystemAudioListener(samplerate=args.samplerate)
+    audio_listener = SystemAudioListener(
+        samplerate=args.samplerate,
+        use_wasapi_loopback=args.loopback,
+        output_device=args.output_device,
+        input_device_index=args.input_index
+    )
     
     # Буфер для накопления текста с последнего Enter
     since_enter_text = []
