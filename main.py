@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
-System Audio Copilot - CLI инструмент для живой транскрибации системного звука
-с возможностью получения подсказок от AI ассистента.
+System Audio Copilot - CLI tool for live transcription of system audio
+with the ability to get hints from an AI assistant.
 """
 
 import argparse
@@ -12,7 +12,7 @@ import time
 from typing import Optional
 
 import numpy as np
-from dotenv import load_dotenv
+from dotenv import load_dotenv, find_dotenv
 from openai import OpenAI
 
 from audio_capture import SystemAudioListener
@@ -21,12 +21,27 @@ from llm import make_hint
 
 
 def load_config():
-    """Загрузка конфигурации из переменных окружения."""
-    load_dotenv()
-    
+    """Load configuration from .env located next to the executable/script."""
+    # Determine the directory to search for .env
+    base_dir = None
+    try:
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.path.dirname(os.path.abspath(__file__))
+    except Exception:
+        base_dir = os.getcwd()
+
+    # First try .env next to the exe/script, then do a standard search
+    env_path = os.path.join(base_dir, '.env')
+    if os.path.exists(env_path):
+        load_dotenv(env_path)
+    else:
+        load_dotenv(find_dotenv())
+
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
-        print("[error] OPENAI_API_KEY не найден в переменных окружения", file=sys.stderr)
+        print("[error] OPENAI_API_KEY not found in environment variables", file=sys.stderr)
         sys.exit(1)
     
     return {
@@ -38,11 +53,11 @@ def load_config():
 
 
 def setup_openai_client(api_key: str) -> OpenAI:
-    """Создание OpenAI клиента."""
+    """Create an OpenAI client."""
     try:
         return OpenAI(api_key=api_key)
     except Exception as e:
-        print(f"[error] Не удалось создать OpenAI клиент: {e}", file=sys.stderr)
+        print(f"[error] Failed to create OpenAI client: {e}", file=sys.stderr)
         sys.exit(1)
 
 
@@ -52,30 +67,38 @@ def live_transcription_worker(
     config: dict,
     window_sec: float,
     enter_only: bool,
+    vad_threshold: float,
     since_enter_text: list,
     since_enter_lock: threading.Lock
 ):
     """
-    Фоновый поток для живой транскрибации.
+    Background worker for live transcription.
     
     Args:
-        audio_listener: Слушатель аудио
-        client: OpenAI клиент
-        config: Конфигурация
-        window_sec: Интервал транскрибации в секундах
-        enter_only: Флаг режима "только по Enter"
-        since_enter_text: Список для накопления текста
-        since_enter_lock: Блокировка для since_enter_text
+        audio_listener: Audio listener instance
+        client: OpenAI client
+        config: Configuration dict
+        window_sec: Transcription interval in seconds
+        enter_only: Flag for "Enter-only" mode
+        since_enter_text: List to accumulate text
+        since_enter_lock: Lock for since_enter_text
     """
     while True:
         try:
             time.sleep(window_sec)
             
-            # Получаем аудио чанк
+            # Get audio chunk
             audio_chunk = audio_listener.get_chunk_and_clear()
             
             if len(audio_chunk) > 0:
-                # Транскрибируем
+                # Silence/VAD filter: skip segments that are too quiet
+                try:
+                    rms = float(np.sqrt(np.mean(np.square(audio_chunk))))
+                except Exception:
+                    rms = 0.0
+                if rms < vad_threshold:
+                    continue
+                # Transcribe
                 transcribed_text = transcribe_audio_chunk(
                     audio_chunk, 
                     audio_listener.samplerate, 
@@ -84,17 +107,17 @@ def live_transcription_worker(
                 )
                 
                 if transcribed_text:
-                    # Добавляем в буфер для Enter
+                    # Add to buffer for Enter
                     with since_enter_lock:
                         since_enter_text.append(transcribed_text)
                     
-                    # Печатаем live транскрипцию если не в режиме enter_only
+                    # Print live transcription if not in enter_only mode
                     if not enter_only:
                         print(f"[live] {transcribed_text}")
                         sys.stdout.flush()
                         
         except Exception as e:
-            print(f"[error] Ошибка в потоке транскрибации: {e}", file=sys.stderr)
+            print(f"[error] Error in transcription thread: {e}", file=sys.stderr)
 
 
 def handle_enter_input(
@@ -104,32 +127,32 @@ def handle_enter_input(
     config: dict
 ):
     """
-    Обработка ввода Enter для получения подсказки от AI.
+    Handle Enter key press to get an AI hint.
     
     Args:
-        since_enter_text: Список накопленного текста
-        since_enter_lock: Блокировка для since_enter_text
-        client: OpenAI клиент
-        config: Конфигурация
+        since_enter_text: List of accumulated text
+        since_enter_lock: Lock for since_enter_text
+        client: OpenAI client
+        config: Configuration dict
     """
     with since_enter_lock:
         if not since_enter_text:
-            print("[warning] Нет накопленного текста для отправки")
+            print("[warning] No accumulated text to send")
             return
         
-        # Объединяем весь накопленный текст
+        # Join all accumulated text
         full_text = " ".join(since_enter_text).strip()
         
-        # Очищаем буфер
+        # Clear the buffer
         since_enter_text.clear()
     
     if not full_text:
-        print("[warning] Нет накопленного текста для отправки")
+        print("[warning] No accumulated text to send")
         return
     
-    print(f"[sending] Отправляем текст: {full_text[:100]}{'...' if len(full_text) > 100 else ''}")
+    print(f"[sending] Sending text: {full_text[:100]}{'...' if len(full_text) > 100 else ''}")
     
-    # Получаем подсказку от AI
+    # Get a hint from AI
     hint = make_hint(
         full_text,
         client,
@@ -142,71 +165,78 @@ def handle_enter_input(
         print(hint)
         print("=" * 20)
     else:
-        print("[error] Не удалось получить ответ от ассистента")
+        print("[error] Failed to get assistant response")
     
     sys.stdout.flush()
 
 
 def main():
-    """Основная функция приложения."""
+    """Main entry point of the application."""
     parser = argparse.ArgumentParser(
-        description="System Audio Copilot - живая транскрибация системного звука с AI подсказками"
+        description="System Audio Copilot - live transcription of system audio with AI hints"
     )
     parser.add_argument(
         "--window-sec",
         type=float,
         default=3.0,
-        help="Интервал транскрибации в секундах (по умолчанию: 3.0)"
+        help="Transcription interval in seconds (default: 3.0)"
     )
     parser.add_argument(
         "--samplerate",
         type=int,
         default=16000,
-        help="Частота дискретизации (по умолчанию: 16000)"
+        help="Sample rate (default: 16000)"
     )
     parser.add_argument(
         "--enter-only",
         action="store_true",
-        help="Не печатать live транскрипцию, только накапливать для Enter"
+        help="Do not print live transcription, only accumulate for Enter"
     )
     parser.add_argument(
         "--loopback",
         action="store_true",
-        help="Захват через WASAPI loopback (слушать устройство вывода, что слышите вы)"
+        default=True,
+        help="Capture via WASAPI loopback (listen to the output device, what you hear). Enabled by default"
     )
     parser.add_argument(
         "--output-device",
         type=str,
         default=None,
-        help="Имя устройства вывода для loopback (подстрока, например: 'Headphones')"
+        help="Output device name for loopback (substring, e.g., 'Headphones')"
     )
     parser.add_argument(
         "--input-index",
         type=int,
         default=None,
-        help="Явный индекс входного устройства (PyAudio) для захвата. Полезно для выбора [Loopback]"
+        help="Explicit input device index (PyAudio) for capture. Useful for selecting [Loopback]"
+    )
+    parser.add_argument(
+        "--vad-threshold",
+        type=float,
+        default=float(os.getenv("VAD_THRESHOLD", "0.0002")),
+        help="Silence threshold (RMS) below which audio is ignored (default: 1e-4)"
     )
     
     args = parser.parse_args()
     
-    # Загружаем конфигурацию
+    # Load configuration
     config = load_config()
     client = setup_openai_client(config["api_key"])
     
-    print(f"[info] Запуск System Audio Copilot", file=sys.stderr)
-    print(f"[info] Интервал транскрибации: {args.window_sec} сек", file=sys.stderr)
-    print(f"[info] Частота дискретизации: {args.samplerate} Гц", file=sys.stderr)
-    print(f"[info] Режим: {'только по Enter' if args.enter_only else 'живая транскрипция'}", file=sys.stderr)
+    print(f"[info] Starting System Audio Copilot", file=sys.stderr)
+    print(f"[info] Transcription interval: {args.window_sec} s", file=sys.stderr)
+    print(f"[info] Sample rate: {args.samplerate} Hz", file=sys.stderr)
+    print(f"[info] Mode: {'enter-only' if args.enter_only else 'live transcription'}", file=sys.stderr)
     if args.loopback:
-        print(f"[info] Источник звука: WASAPI loopback", file=sys.stderr)
+        print(f"[info] Audio source: WASAPI loopback", file=sys.stderr)
         if args.output_device:
-            print(f"[info] Устройство вывода для loopback: {args.output_device}", file=sys.stderr)
+            print(f"[info] Output device for loopback: {args.output_device}", file=sys.stderr)
     else:
-        print(f"[info] Источник звука: устройство записи (микрофон/микшер)", file=sys.stderr)
-    print(f"[info] Нажмите Enter для получения подсказки от AI, Ctrl+C для выхода", file=sys.stderr)
+        print(f"[info] Audio source: recording device (microphone/mixer)", file=sys.stderr)
+    print(f"[info] Press Enter for an AI hint, Ctrl+C to exit", file=sys.stderr)
     print("=" * 60, file=sys.stderr)
     
-    # Инициализируем слушатель аудио
+    # Initialize audio listener
     audio_listener = SystemAudioListener(
         samplerate=args.samplerate,
         use_wasapi_loopback=args.loopback,
@@ -214,42 +244,42 @@ def main():
         input_device_index=args.input_index
     )
     
-    # Буфер для накопления текста с последнего Enter
+    # Buffer for accumulating text since last Enter
     since_enter_text = []
     since_enter_lock = threading.Lock()
     
     try:
-        # Запускаем запись аудио
+        # Start audio recording
         audio_listener.start_recording()
         
-        # Запускаем поток живой транскрибации
+        # Start live transcription thread
         transcription_thread = threading.Thread(
             target=live_transcription_worker,
-            args=(audio_listener, client, config, args.window_sec, args.enter_only, since_enter_text, since_enter_lock),
+            args=(audio_listener, client, config, args.window_sec, args.enter_only, args.vad_threshold, since_enter_text, since_enter_lock),
             daemon=True
         )
         transcription_thread.start()
         
-        # Основной цикл обработки ввода
+        # Main input loop
         while True:
             try:
                 user_input = input()
                 if user_input.strip() == "" or user_input.strip() == "Enter":
                     handle_enter_input(since_enter_text, since_enter_lock, client, config)
                 else:
-                    print("[info] Нажмите Enter для получения подсказки от AI")
+                    print("[info] Press Enter to get an AI hint")
                     
             except EOFError:
                 break
                 
     except KeyboardInterrupt:
-        print("\n[info] Получен сигнал завершения...", file=sys.stderr)
+        print("\n[info] Termination signal received...", file=sys.stderr)
     except Exception as e:
-        print(f"[error] Критическая ошибка: {e}", file=sys.stderr)
+        print(f"[error] Critical error: {e}", file=sys.stderr)
     finally:
-        # Корректно останавливаем запись
+        # Stop recording cleanly
         audio_listener.stop_recording()
-        print("[info] Приложение завершено", file=sys.stderr)
+        print("[info] Application finished", file=sys.stderr)
 
 
 if __name__ == "__main__":
