@@ -21,7 +21,7 @@ Python CLI tool for Windows 11 that listens to system audio (WASAPI loopback) an
 ### Download prebuilt Windows binary
 
 - Go to the project [Releases page](https://github.com/Gansager/system_audio_copilot/releases) and download `SystemAudioCopilot.exe`.
-- Place a `.env` next to the `.exe` (copy from `env_example.txt`), add `OPENAI_API_KEY`.
+- Place a `.env` next to the `.exe` (copy from [env_example.txt](https://github.com/Gansager/system_audio_copilot/blob/main/env_example.txt)), add `OPENAI_API_KEY`.
 - Run from CMD/PowerShell:
 
 ```powershell
