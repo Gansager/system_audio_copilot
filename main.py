@@ -68,6 +68,8 @@ def live_transcription_worker(
     window_sec: float,
     enter_only: bool,
     vad_threshold: float,
+    vad_frame_ms: int,
+    vad_min_voiced_ratio: float,
     since_enter_text: list,
     since_enter_lock: threading.Lock
 ):
@@ -91,12 +93,25 @@ def live_transcription_worker(
             audio_chunk = audio_listener.get_chunk_and_clear()
             
             if len(audio_chunk) > 0:
-                # Silence/VAD filter: skip segments that are too quiet
+                # VAD gating over sub-frames
                 try:
-                    rms = float(np.sqrt(np.mean(np.square(audio_chunk))))
+                    sr = int(audio_listener.samplerate)
+                    frame_size = int(max(1, round((vad_frame_ms / 1000.0) * sr)))
+                    num_frames = int(np.ceil(len(audio_chunk) / frame_size)) if frame_size > 0 else 1
+                    pad_len = num_frames * frame_size - len(audio_chunk)
+                    if pad_len > 0:
+                        padded = np.pad(audio_chunk, (0, pad_len), mode='constant')
+                    else:
+                        padded = audio_chunk
+                    frames = padded.reshape(num_frames, frame_size)
+                    rms_per_frame = np.sqrt(np.mean(np.square(frames), axis=1))
+                    voiced_flags = rms_per_frame >= vad_threshold
+                    voiced_ratio = float(np.mean(voiced_flags)) if num_frames > 0 else 0.0
                 except Exception:
-                    rms = 0.0
-                if rms < vad_threshold:
+                    voiced_ratio = 0.0
+
+                if voiced_ratio < vad_min_voiced_ratio:
+                    # Skip silent/low-voicing windows entirely
                     continue
                 # Transcribe
                 transcribed_text = transcribe_audio_chunk(
@@ -178,8 +193,8 @@ def main():
     parser.add_argument(
         "--window-sec",
         type=float,
-        default=3.0,
-        help="Transcription interval in seconds (default: 3.0)"
+        default=2.0,
+        help="Transcription interval in seconds (default: 2.0)"
     )
     parser.add_argument(
         "--samplerate",
@@ -214,7 +229,19 @@ def main():
         "--vad-threshold",
         type=float,
         default=float(os.getenv("VAD_THRESHOLD", "0.0002")),
-        help="Silence threshold (RMS) below which audio is ignored (default: 1e-4)"
+        help="Silence threshold (RMS) below which audio is ignored (default: 0.0002)"
+    )
+    parser.add_argument(
+        "--vad-frame-ms",
+        type=int,
+        default=50,
+        help="VAD sub-frame size in milliseconds (default: 50)"
+    )
+    parser.add_argument(
+        "--vad-min-voiced-ratio",
+        type=float,
+        default=0.2,
+        help="Minimum fraction of voiced sub-frames to treat the window as speech (default: 0.2)"
     )
     
     args = parser.parse_args()
@@ -255,7 +282,18 @@ def main():
         # Start live transcription thread
         transcription_thread = threading.Thread(
             target=live_transcription_worker,
-            args=(audio_listener, client, config, args.window_sec, args.enter_only, args.vad_threshold, since_enter_text, since_enter_lock),
+            args=(
+                audio_listener,
+                client,
+                config,
+                args.window_sec,
+                args.enter_only,
+                args.vad_threshold,
+                args.vad_frame_ms,
+                args.vad_min_voiced_ratio,
+                since_enter_text,
+                since_enter_lock
+            ),
             daemon=True
         )
         transcription_thread.start()

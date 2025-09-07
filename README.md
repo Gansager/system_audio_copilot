@@ -5,7 +5,7 @@ Python CLI tool for Windows 11 that listens to system audio (WASAPI loopback) an
 ## Features
 
 - 🎧 **Capture system audio** via WASAPI loopback (not the microphone)
-- 📝 **Live transcription** of system audio every 3 seconds
+- 📝 **Live transcription** of system audio every 2 seconds
 - 🤖 **AI hints** from OpenAI GPT on Enter key press
 - ⚡ **Incremental processing** - accumulate text between requests
 - 🔧 **Configurable parameters** via CLI arguments and environment variables
@@ -17,6 +17,18 @@ Python CLI tool for Windows 11 that listens to system audio (WASAPI loopback) an
 - **OpenAI API key** for Whisper and Chat Completions
 
 ## Installation
+
+### Download prebuilt Windows binary
+
+- Go to the project Releases page and download `SystemAudioCopilot.exe`.
+- Place a `.env` next to the `.exe` (copy from `env_example.txt`), add `OPENAI_API_KEY`.
+- Run from CMD/PowerShell:
+
+```powershell
+./SystemAudioCopilot.exe --loopback --output-device "Headphones"
+```
+
+Or continue below to build from source.
 
 ### 1. Clone and set up environment
 
@@ -58,9 +70,11 @@ python main.py
 python main.py --help
 ```
 
-- `--window-sec FLOAT` - Transcription interval in seconds (default: 3.0)
+- `--window-sec FLOAT` - Transcription interval in seconds (default: 2.0)
 - `--samplerate INT` - Sample rate (default: 16000)
 - `--enter-only` - Do not print live transcription, only accumulate for Enter
+- `--vad-frame-ms INT` - VAD sub-frame size in ms (default: 50)
+- `--vad-min-voiced-ratio FLOAT` - Minimum fraction of voiced sub-frames to consider the window speech (default: 0.2)
 
 ### Examples
 
@@ -70,6 +84,9 @@ python main.py
 
 # Increased transcription interval
 python main.py --window-sec 5
+
+# Tune VAD sub-frames and gating
+python main.py --vad-frame-ms 30 --vad-min-voiced-ratio 0.15
 
 # "Enter-only" mode (no live transcription)
 python main.py --enter-only
@@ -114,7 +131,7 @@ The app uses **WASAPI loopback** to capture system audio. This means it listens 
 ### Live transcription
 
 1. **Background capture**: The app continuously records system audio
-2. **Incremental processing**: Every N seconds (default 3) it sends the accumulated audio to OpenAI Whisper
+2. **Incremental processing**: Every N seconds (default 2.0) it sends the accumulated audio to OpenAI Whisper, gated by a lightweight VAD
 3. **Live output**: Recognized text is printed to the console immediately
 4. **Accumulation**: The same text is added to a buffer for future AI requests
 
