@@ -1,3 +1,32 @@
+# Python caches and envs
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.log
+*.egg-info/
+.venv/
+venv/
+.env
+
+# PyInstaller build outputs
+/build/
+/dist/
+
+# PyInstaller artifacts (defensive, even if build/ is ignored)
+*.toc
+build/**/warn-*.txt
+build/**/xref-*.html
+build/**/base_library.zip
+build/**/PYZ-*.*
+build/**/localpycs/
+build/**/SystemAudioCopilot.pkg
+
+# IDEs and OS junk
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
 # Игнорировать виртуальное окружение
 .venv/
 
