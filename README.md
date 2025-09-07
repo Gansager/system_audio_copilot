@@ -25,7 +25,7 @@ Python CLI tool for Windows 11 that listens to system audio (WASAPI loopback) an
 - Run from CMD/PowerShell:
 
 ```powershell
-./SystemAudioCopilot.exe --loopback --output-device "Headphones"
+./SystemAudioCopilot.exe --loopback
 ```
 
 Or continue below to build from source.
