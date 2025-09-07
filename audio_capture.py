@@ -1,5 +1,5 @@
 """
-Модуль для захвата системного звука через WASAPI loopback.
+Module for capturing system audio via WASAPI loopback.
 """
 
 import sys
@@ -9,7 +9,7 @@ import numpy as np
 import pyaudio
 from typing import Optional
 
-# Опциональный импорт sounddevice для WASAPI loopback
+# Optional import of sounddevice for WASAPI loopback
 try:
     import sounddevice as sd  # type: ignore
     HAVE_SD = True
@@ -17,7 +17,7 @@ except Exception:
     sd = None  # type: ignore
     HAVE_SD = False
 
-# Опциональный импорт PyAudioWPatch (WASAPI loopback)
+# Optional import of PyAudioWPatch (WASAPI loopback)
 try:
     import pyaudiowpatch as pyaudio_wasapi  # type: ignore
     HAVE_PAW = True
@@ -28,71 +28,71 @@ except Exception:
 
 class SystemAudioListener:
     """
-    Класс для захвата системного звука через WASAPI loopback.
-    Использует pyaudio для захвата системного звука.
+    Class for capturing system audio via WASAPI loopback.
+    Uses PyAudio to capture system audio.
     """
     
     def __init__(self, samplerate: int = 16000, channels: int = 1, use_wasapi_loopback: bool = False, output_device: Optional[str] = None, input_device_index: Optional[int] = None):
         """
-        Инициализация слушателя системного звука.
+        Initialize system audio listener.
         
         Args:
-            samplerate: Частота дискретизации (по умолчанию 16 кГц)
-            channels: Количество каналов (по умолчанию 1 - моно)
+            samplerate: Sample rate (default 16 kHz)
+            channels: Number of channels (default 1 - mono)
         """
         self.samplerate = samplerate
         self.channels = channels
-        self.frame_duration_ms = 100  # Длительность кадра в миллисекундах
+        self.frame_duration_ms = 100  # Frame duration in milliseconds
         self.frame_size = int(samplerate * self.frame_duration_ms / 1000)
         
-        # Буферы для аудио данных
-        self.live_buffer = []  # Для живой транскрибации
-        self.since_enter_buffer = []  # Для отправки по Enter
+        # Buffers for audio data
+        self.live_buffer = []  # For live transcription
+        self.since_enter_buffer = []  # For sending on Enter
         
-        # Потокобезопасность
+        # Thread-safety
         self.lock = threading.Lock()
         
-        # Состояние
+        # State
         self.is_recording = False
         self.audio = None
-        self.stream = None  # Поток PyAudio/PyAudioWPatch или sounddevice
+        self.stream = None  # PyAudio/PyAudioWPatch or sounddevice stream
         self.backend = "pyaudio"  # "pyaudio" | "sounddevice"
-        self.pa_module = pyaudio  # активный модуль PyAudio (стандартный или patched)
+        self.pa_module = pyaudio  # active PyAudio module (standard or patched)
         self._pa_continue = pyaudio.paContinue
         self._pa_abort = pyaudio.paAbort
-        self.stream_channels = channels  # фактическое число каналов в открытом потоке
+        self.stream_channels = channels  # actual number of channels in opened stream
 
-        # Настройки loopback
+        # Loopback settings
         self.use_wasapi_loopback = bool(use_wasapi_loopback)
         self.output_device_name = output_device
         self.input_device_index = input_device_index
         self.recording_thread = None
         
-        # Инициализация pyaudio (нужен даже если будем пробовать sounddevice, чтобы сохранить обратную совместимость)
+        # Initialize PyAudio (needed even if we try sounddevice, to keep backward compatibility)
         try:
             self.audio = pyaudio.PyAudio()
-            print(f"[info] PyAudio инициализирован", file=sys.stderr)
+            print(f"[info] PyAudio initialized", file=sys.stderr)
         except Exception as e:
-            raise RuntimeError(f"Не удалось инициализировать PyAudio: {e}")
+            raise RuntimeError(f"Failed to initialize PyAudio: {e}")
     
     def start_recording(self):
-        """Запуск записи системного звука."""
+        """Start recording system audio."""
         if self.is_recording:
             return
         
         try:
-            # Предпочитаем WASAPI loopback на Windows
+            # Prefer WASAPI loopback on Windows
             if self.use_wasapi_loopback and sys.platform == 'win32':
-                # 1) PyAudioWPatch (надежный вариант)
+                # 1) PyAudioWPatch (reliable option)
                 if HAVE_PAW:
                     self._start_recording_pyaudio_wasapi_loopback()
                     return
-                # 2) sounddevice (если доступен)
+                # 2) sounddevice (if available)
                 if HAVE_SD:
                     self._start_recording_sounddevice_loopback()
                     return
 
-            # Иначе используем прежний путь через PyAudio (микрофон или loopback-устройство в списке входов)
+            # Otherwise use the previous path via PyAudio (microphone or loopback device in input list)
             loopback_device = None
             sel_device_info = None
 
@@ -102,8 +102,10 @@ class SystemAudioListener:
                     if self.output_device_name:
                         desired_out_name_lower = self.output_device_name.lower()
                     else:
+                        # By default listen to the default output device
                         out_info = self.audio.get_default_output_device_info()
                         desired_out_name_lower = str(out_info.get('name', '')).lower()
+                        print(f"[info] Target default output device: {out_info.get('name', '')}", file=sys.stderr)
                 except Exception:
                     desired_out_name_lower = None
 
@@ -113,7 +115,7 @@ class SystemAudioListener:
             for i in range(self.audio.get_device_count()):
                 device_info = self.audio.get_device_info_by_index(i)
                 device_name = str(device_info.get('name', '')).lower()
-                # Ищем входные устройства с пометкой loopback
+                # Look for input devices marked as loopback
                 if ('loopback' in device_name or 
                     'stereo mix' in device_name or 
                     'what u hear' in device_name or
@@ -124,29 +126,29 @@ class SystemAudioListener:
                     if desired_out_name_lower and desired_out_name_lower in device_name:
                         loopback_device = i
                         sel_device_info = device_info
-                        print(f"[info] Найдено устройство loopback: {device_info['name']}", file=sys.stderr)
+                        print(f"[info] Found loopback device: {device_info['name']}", file=sys.stderr)
                         break
 
             if loopback_device is None and first_loopback_idx is not None:
                 loopback_device = first_loopback_idx
                 sel_device_info = first_loopback_info
-                print(f"[info] Найдено устройство loopback: {sel_device_info['name']}", file=sys.stderr)
+                print(f"[info] Found loopback device: {sel_device_info['name']}", file=sys.stderr)
 
             if loopback_device is None:
                 sel_device_info = self.audio.get_default_input_device_info()
                 loopback_device = sel_device_info['index']
-                print(f"[info] Используется устройство по умолчанию: {self.audio.get_device_info_by_index(loopback_device)['name']}", file=sys.stderr)
+                print(f"[info] Using default input device: {self.audio.get_device_info_by_index(loopback_device)['name']}", file=sys.stderr)
 
-            # Если пользователь явно указал индекс входного устройства — используем его
+            # If user explicitly provided input device index — use it
             if self.input_device_index is not None:
                 try:
                     sel_device_info = self.audio.get_device_info_by_index(self.input_device_index)
                     loopback_device = self.input_device_index
-                    print(f"[info] Используется указанный индекс устройства: {sel_device_info['name']} (#{self.input_device_index})", file=sys.stderr)
+                    print(f"[info] Using specified device index: {sel_device_info['name']} (#{self.input_device_index})", file=sys.stderr)
                 except Exception as e:
-                    print(f"[warning] Указанный индекс входного устройства недоступен: {e}. Игнорируем.", file=sys.stderr)
+                    print(f"[warning] Provided input device index is unavailable: {e}. Ignoring.", file=sys.stderr)
 
-            # Подгоняем частоту дискретизации и каналы под устройство
+            # Adjust sample rate and channels to the device
             try:
                 dev_sr = int(sel_device_info.get('defaultSampleRate', self.samplerate))  # type: ignore
             except Exception:
@@ -171,16 +173,16 @@ class SystemAudioListener:
             self._pa_abort = pyaudio.paAbort
             self.is_recording = True
             self.stream.start_stream()
-            print("[info] Запись системного звука запущена", file=sys.stderr)
+            print("[info] System audio recording started", file=sys.stderr)
 
         except Exception as e:
-            raise RuntimeError(f"Не удалось запустить запись: {e}")
+            raise RuntimeError(f"Failed to start recording: {e}")
 
     def _start_recording_sounddevice_loopback(self):
-        """Запуск записи через sounddevice в режиме WASAPI loopback."""
+        """Start recording via sounddevice in WASAPI loopback mode."""
         assert HAVE_SD
         try:
-            # Определяем устройство вывода
+            # Determine output device
             selected_output_index = None
             selected_output_name = None
 
@@ -208,19 +210,19 @@ class SystemAudioListener:
                     selected_output_index = default_out
                     selected_output_name = devices[default_out]['name']
                 else:
-                    # Ищем первое доступное устройство вывода
+                    # Find the first available output device
                     for idx, info in enumerate(devices):
                         if info.get('max_output_channels', 0) > 0:
                             selected_output_index = idx
                             selected_output_name = info.get('name', str(idx))
                             break
                 if selected_output_index is None:
-                    raise RuntimeError("Не найдено доступное устройство вывода для loopback")
+                    raise RuntimeError("No available output device found for loopback")
 
-            # Создаем входной поток c loopback=True на устройстве вывода
+            # Create an input stream with loopback=True on the output device
             wasapi_settings = sd.WasapiSettings(loopback=True)  # type: ignore
 
-            # Для стабильности используем 2 канала и затем миксуем в моно при необходимости
+            # For stability use 2 channels and then mix down to mono if needed
             sd_channels = max(1, self.channels)
 
             self.stream = sd.InputStream(  # type: ignore
@@ -236,22 +238,22 @@ class SystemAudioListener:
             self.stream.start()
             self.backend = "sounddevice"
             self.is_recording = True
-            print(f"[info] WASAPI loopback активирован. Устройство вывода: {selected_output_name}", file=sys.stderr)
+            print(f"[info] WASAPI loopback enabled. Output device: {selected_output_name}", file=sys.stderr)
 
         except Exception as e:
-            print(f"[warning] Не удалось запустить WASAPI loopback: {e}. Переход на PyAudio.", file=sys.stderr)
-            # Фолбэк на PyAudio
+            print(f"[warning] Failed to start WASAPI loopback: {e}. Falling back to PyAudio.", file=sys.stderr)
+            # Fallback to PyAudio
             self.use_wasapi_loopback = False
             self._safe_close_sd_stream()
-            # Повторный запуск через PyAudio
+            # Retry via PyAudio
             self.start_recording()
 
     def _start_recording_pyaudio_wasapi_loopback(self):
-        """Запуск записи через PyAudioWPatch (WASAPI loopback)."""
+        """Start recording via PyAudioWPatch (WASAPI loopback)."""
         assert HAVE_PAW
         try:
             p = pyaudio_wasapi.PyAudio()  # type: ignore
-            # Сохраняем как активный PyAudio
+            # Save as the active PyAudio
             if self.audio is not None:
                 try:
                     self.audio.terminate()
@@ -259,16 +261,16 @@ class SystemAudioListener:
                     pass
             self.audio = p
 
-            # Ищем host API WASAPI
+            # Find WASAPI host API
             wasapi_info = p.get_host_api_info_by_type(pyaudio_wasapi.paWASAPI)  # type: ignore
             wasapi_index = wasapi_info.get('index', None)
             if wasapi_index is None:
-                raise RuntimeError("WASAPI host API недоступен")
+                raise RuntimeError("WASAPI host API is unavailable")
 
             selected_output_index = None
             selected_output_name = None
 
-            # Если задано имя устройства, ищем среди WASAPI output устройств
+            # If an output device name is provided, search among WASAPI output devices
             if self.output_device_name:
                 name_lower = self.output_device_name.lower()
                 for i in range(p.get_device_count()):
@@ -280,7 +282,7 @@ class SystemAudioListener:
                             selected_output_name = dev_name
                             break
 
-            # Иначе берём устройство вывода по умолчанию для WASAPI
+            # Otherwise take the default output device for WASAPI
             if selected_output_index is None:
                 default_out = wasapi_info.get('defaultOutputDevice', -1)
                 if isinstance(default_out, int) and default_out >= 0:
@@ -288,7 +290,7 @@ class SystemAudioListener:
                     selected_output_index = dev['index']
                     selected_output_name = dev.get('name', str(default_out))
                 else:
-                    # Фолбэк: первое доступное output устройство в WASAPI
+                    # Fallback: first available output device in WASAPI
                     for i in range(p.get_device_count()):
                         dev = p.get_device_info_by_index(i)
                         if dev.get('hostApi') == wasapi_index and dev.get('maxOutputChannels', 0) > 0:
@@ -297,9 +299,9 @@ class SystemAudioListener:
                             break
 
             if selected_output_index is None:
-                raise RuntimeError("Не найдено WASAPI устройство вывода для loopback")
+                raise RuntimeError("No WASAPI output device found for loopback")
 
-            # Частота дискретизации по умолчанию для выбранного устройства
+            # Default sample rate for the selected device
             dev_info = p.get_device_info_by_index(selected_output_index)
             try:
                 dev_sr = int(dev_info.get('defaultSampleRate', self.samplerate))  # type: ignore
@@ -307,10 +309,10 @@ class SystemAudioListener:
                 dev_sr = self.samplerate
             self.samplerate = dev_sr
 
-            # Для надежности откроем 2 канала, затем при необходимости сведём в моно
+            # For reliability open 2 channels, then mix down to mono if needed
             self.stream_channels = 2 if self.channels == 1 else max(1, self.channels)
 
-            # Открываем входной поток как loopback с выбранного устройства вывода (через StreamInfo)
+            # Open an input stream as loopback from the selected output device (via StreamInfo)
             wasapi_info = pyaudio_wasapi.PaWasapiStreamInfo(  # type: ignore
                 flags=pyaudio_wasapi.paWinWasapiLoopback  # type: ignore
             )
@@ -332,24 +334,24 @@ class SystemAudioListener:
             self._pa_abort = pyaudio_wasapi.paAbort  # type: ignore
             self.is_recording = True
             self.stream.start_stream()
-            print(f"[info] WASAPI loopback активирован (PyAudioWPatch). Устройство вывода: {selected_output_name}", file=sys.stderr)
-            print(f"[info] Эффективная частота: {self.samplerate} Гц, каналы: {self.stream_channels}", file=sys.stderr)
+            print(f"[info] WASAPI loopback enabled (PyAudioWPatch). Output device: {selected_output_name}", file=sys.stderr)
+            print(f"[info] Effective rate: {self.samplerate} Hz, channels: {self.stream_channels}", file=sys.stderr)
 
         except Exception as e:
-            print(f"[warning] Не удалось запустить WASAPI loopback (PyAudioWPatch): {e}. Переход на резервные режимы.", file=sys.stderr)
-            # Попробуем sounddevice
+            print(f"[warning] Failed to start WASAPI loopback (PyAudioWPatch): {e}. Trying fallback modes.", file=sys.stderr)
+            # Try sounddevice
             if HAVE_SD:
                 try:
                     self._start_recording_sounddevice_loopback()
                     return
                 except Exception:
                     pass
-            # Иначе фолбэк на PyAudio обычный
+            # Otherwise fallback to regular PyAudio
             self.use_wasapi_loopback = False
             self.start_recording()
     
     def stop_recording(self):
-        """Остановка записи системного звука."""
+        """Stop recording system audio."""
         if not self.is_recording:
             return
         
@@ -367,28 +369,28 @@ class SystemAudioListener:
                     pass
             self.stream = None
         
-        print("[info] Запись системного звука остановлена", file=sys.stderr)
+        print("[info] System audio recording stopped", file=sys.stderr)
     
     def _audio_callback(self, in_data, frame_count, time_info, status):
-        """Callback функция для обработки аудио данных."""
+        """Callback function for processing audio data."""
         try:
             if status:
-                print(f"[warning] Статус аудио потока: {status}", file=sys.stderr)
+                print(f"[warning] Audio stream status: {status}", file=sys.stderr)
             
             if in_data:
-                # Конвертируем байты в numpy массив float32
+                # Convert bytes to numpy float32 array
                 audio_data = np.frombuffer(in_data, dtype=np.float32)
                 
-                # Если стерео, конвертируем в моно
+                # If stereo, convert to mono
                 if self.channels == 2:
                     audio_data = audio_data.reshape(-1, 2).mean(axis=1)
                 
                 with self.lock:
-                    # Добавляем в оба буфера
+                    # Append to both buffers
                     self.live_buffer.append(audio_data.copy())
                     self.since_enter_buffer.append(audio_data.copy())
                     
-                    # Ограничиваем размер буферов (храним последние 30 секунд)
+                    # Limit buffer sizes (keep last 30 seconds)
                     max_frames = int(30 * self.samplerate / self.frame_size)
                     if len(self.live_buffer) > max_frames:
                         self.live_buffer = self.live_buffer[-max_frames:]
@@ -398,23 +400,23 @@ class SystemAudioListener:
             return (None, self._pa_continue)
             
         except Exception as e:
-            print(f"[error] Ошибка в audio callback: {e}", file=sys.stderr)
+            print(f"[error] Error in audio callback: {e}", file=sys.stderr)
             return (None, self._pa_abort)
 
     def _sd_callback(self, indata, frames, time_info, status):  # type: ignore
-        """Callback для sounddevice (WASAPI loopback)."""
+        """Callback for sounddevice (WASAPI loopback)."""
         try:
             if status:
-                print(f"[warning] Статус аудио потока (sd): {status}", file=sys.stderr)
+                print(f"[warning] Audio stream status (sd): {status}", file=sys.stderr)
 
             if indata is not None:
                 audio_data = np.array(indata, dtype=np.float32, copy=False)
-                # Приводим к (N,) float32
+                # Normalize to (N,) float32
                 if audio_data.ndim == 2:
                     if self.channels == 1:
                         audio_data = audio_data.mean(axis=1)
                     else:
-                        # Оставляем как есть, затем выровняем в 1D
+                        # Leave as is, then flatten to 1D
                         audio_data = audio_data.reshape(-1)
                 else:
                     audio_data = audio_data.reshape(-1)
@@ -429,7 +431,7 @@ class SystemAudioListener:
                     if len(self.since_enter_buffer) > max_frames:
                         self.since_enter_buffer = self.since_enter_buffer[-max_frames:]
         except Exception as e:
-            print(f"[error] Ошибка в sd callback: {e}", file=sys.stderr)
+            print(f"[error] Error in sd callback: {e}", file=sys.stderr)
 
     def _safe_close_sd_stream(self):
         try:
@@ -441,49 +443,49 @@ class SystemAudioListener:
     
     def get_chunk_and_clear(self) -> np.ndarray:
         """
-        Получить накопленные данные для живой транскрибации и очистить буфер.
+        Get accumulated data for live transcription and clear the buffer.
         
         Returns:
-            numpy.ndarray: Аудио данные в формате float32
+            numpy.ndarray: Audio data in float32
         """
         with self.lock:
             if not self.live_buffer:
                 return np.array([], dtype=np.float32)
             
-            # Объединяем все кадры в один массив
+            # Concatenate all frames into one array
             audio_chunk = np.concatenate(self.live_buffer, axis=0)
             
-            # Очищаем буфер
+            # Clear the buffer
             self.live_buffer.clear()
             
             return audio_chunk
     
     def get_since_last_enter_and_clear(self) -> np.ndarray:
         """
-        Получить накопленные данные с последнего Enter и очистить буфер.
+        Get accumulated data since last Enter and clear the buffer.
         
         Returns:
-            numpy.ndarray: Аудио данные в формате float32
+            numpy.ndarray: Audio data in float32
         """
         with self.lock:
             if not self.since_enter_buffer:
                 return np.array([], dtype=np.float32)
             
-            # Объединяем все кадры в один массив
+            # Concatenate all frames into one array
             audio_chunk = np.concatenate(self.since_enter_buffer, axis=0)
             
-            # Очищаем буфер
+            # Clear the buffer
             self.since_enter_buffer.clear()
             
             return audio_chunk
     
     def __enter__(self):
-        """Контекстный менеджер - вход."""
+        """Context manager - enter."""
         self.start_recording()
         return self
     
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Контекстный менеджер - выход."""
+        """Context manager - exit."""
         self.stop_recording()
         if self.audio:
             self.audio.terminate()

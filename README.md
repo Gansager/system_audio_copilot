@@ -1,168 +1,188 @@
 # System Audio Copilot
 
-Python CLI-инструмент для Windows 11, который слушает системный звук (WASAPI loopback) и предоставляет живую транскрибацию с возможностью получения подсказок от AI ассистента.
+Python CLI tool for Windows 11 that listens to system audio (WASAPI loopback) and provides live transcription with the ability to get hints from an AI assistant.
 
-## Возможности
+## Features
 
-- 🎧 **Захват системного звука** через WASAPI loopback (не микрофон)
-- 📝 **Живая транскрибация** системного звука каждые 3 секунды
-- 🤖 **AI подсказки** от OpenAI GPT по нажатию Enter
-- ⚡ **Инкрементальная обработка** - накопление текста между запросами
-- 🔧 **Настраиваемые параметры** через CLI аргументы и переменные окружения
+- 🎧 **Capture system audio** via WASAPI loopback (not the microphone)
+- 📝 **Live transcription** of system audio every 3 seconds
+- 🤖 **AI hints** from OpenAI GPT on Enter key press
+- ⚡ **Incremental processing** - accumulate text between requests
+- 🔧 **Configurable parameters** via CLI arguments and environment variables
 
-## Технические требования
+## Requirements
 
-- **ОС**: Windows 11
+- **OS**: Windows 11
 - **Python**: 3.8+
-- **OpenAI API ключ** для доступа к Whisper и Chat Completions
+- **OpenAI API key** for Whisper and Chat Completions
 
-## Установка
+## Installation
 
-### 1. Клонирование и настройка окружения
+### 1. Clone and set up environment
 
 ```bash
-# Создание виртуального окружения
+# Create virtual environment
 python -m venv .venv
 
-# Активация окружения (Windows)
+# Activate environment (Windows)
 .venv\Scripts\activate
 
-# Установка зависимостей
+# Install dependencies
 pip install -r requirements.txt
 ```
 
-### 2. Настройка переменных окружения
+### 2. Configure environment variables
 
-Создайте файл `.env` в корне проекта:
+Create a `.env` file in the project root:
 
 ```env
-OPENAI_API_KEY=sk-your-openai-api-key-here
+OPENAI_API_KEY=sk-REPLACE_WITH_YOUR_KEY
 MODEL_TRANSCRIBE=whisper-1
 MODEL_HINTS=gpt-4o-mini
 TEMPERATURE=0.2
 ```
 
-**Важно**: Замените `sk-your-openai-api-key-here` на ваш реальный API ключ от OpenAI.
+**Important**: Replace `sk-REPLACE_WITH_YOUR_KEY` with your real OpenAI API key.
 
-## Использование
+## Usage
 
-### Базовый запуск
+### Basic run
 
 ```bash
 python main.py
 ```
 
-### Параметры командной строки
+### Command-line options
 
 ```bash
 python main.py --help
 ```
 
-- `--window-sec FLOAT` - Интервал транскрибации в секундах (по умолчанию: 3.0)
-- `--samplerate INT` - Частота дискретизации (по умолчанию: 16000)
-- `--enter-only` - Не печатать live транскрипцию, только накапливать для Enter
+- `--window-sec FLOAT` - Transcription interval in seconds (default: 3.0)
+- `--samplerate INT` - Sample rate (default: 16000)
+- `--enter-only` - Do not print live transcription, only accumulate for Enter
 
-### Примеры использования
+### Examples
 
 ```bash
-# Стандартный режим с живой транскрипцией
+# Standard mode with live transcription
 python main.py
 
-# Увеличенный интервал транскрибации
+# Increased transcription interval
 python main.py --window-sec 5
 
-# Режим "только по Enter" (без live транскрипции)
+# "Enter-only" mode (no live transcription)
 python main.py --enter-only
 
-# Кастомная частота дискретизации
+# Custom sample rate
 python main.py --samplerate 22050
 ```
 
-## Как это работает
+## Build Windows .exe
+
+1) Run the build script:
+```
+build_exe.bat
+```
+After the build you will get `dist\SystemAudioCopilot.exe`.
+
+2) Place a `.env` file next to the `.exe` (you can copy from `env_example.txt`) and set your `OPENAI_API_KEY`.
+
+3) Example run:
+```
+dist\SystemAudioCopilot.exe --loopback --output-device "Headphones"
+```
+
+Notes:
+- `.env` is taken from the folder next to the `.exe`.
+- To choose a device by index use `--input-index N`.
+- For proper Unicode in CMD: `chcp 65001`.
+
+## How it works
 
 ### WASAPI Loopback
 
-Приложение использует **WASAPI loopback** для захвата системного звука. Это означает, что оно слушает звук, который воспроизводится через ваши динамики/наушники, а не звук с микрофона.
+The app uses **WASAPI loopback** to capture system audio. This means it listens to the sound that is played through your speakers/headphones, not the microphone.
 
-**Источники звука, которые будут захвачены:**
-- Видео в браузере (YouTube, Netflix, etc.)
-- Звонки в Zoom, Teams, Discord
-- Музыка из Spotify, Apple Music
-- Звуки игр и приложений
-- Любой другой системный звук
+**Audio sources that will be captured:**
+- Browser video (YouTube, Netflix, etc.)
+- Calls in Zoom, Teams, Discord
+- Music from Spotify, Apple Music
+- Game and app sounds
+- Any other system audio
 
-### Живая транскрибация
+### Live transcription
 
-1. **Фоновый захват**: Приложение непрерывно записывает системный звук
-2. **Инкрементальная обработка**: Каждые N секунд (по умолчанию 3) отправляет накопленный звук в OpenAI Whisper
-3. **Live вывод**: Распознанный текст сразу печатается в консоль
-4. **Накопление**: Тот же текст добавляется в буфер для будущих AI запросов
+1. **Background capture**: The app continuously records system audio
+2. **Incremental processing**: Every N seconds (default 3) it sends the accumulated audio to OpenAI Whisper
+3. **Live output**: Recognized text is printed to the console immediately
+4. **Accumulation**: The same text is added to a buffer for future AI requests
 
-### AI подсказки
+### AI hints
 
-1. **Накопление**: Весь распознанный текст с последнего Enter сохраняется
-2. **Запрос**: При нажатии Enter весь накопленный текст отправляется в GPT
-3. **Ответ**: AI возвращает краткую подсказку (1-2 предложения)
-4. **Сброс**: Буфер очищается, процесс повторяется
+1. **Accumulation**: All recognized text since last Enter is saved
+2. **Request**: On Enter, all accumulated text is sent to GPT
+3. **Response**: AI returns a brief hint (1-2 sentences)
+4. **Reset**: The buffer is cleared and the process repeats
 
-## Устранение неполадок
+## Troubleshooting
 
-### Проблема: "Не удалось инициализировать устройство вывода"
+### Problem: "Failed to initialize output device"
 
-**Решение**: Убедитесь, что у вас есть активное устройство вывода звука (динамики/наушники) и оно установлено как устройство по умолчанию в Windows.
+**Solution**: Make sure you have an active audio output device (speakers/headphones) set as default in Windows.
 
-### Проблема: Звук не захватывается
+### Problem: No audio is captured
 
-**Возможные причины:**
-1. **Неправильное устройство вывода**: Убедитесь, что звук воспроизводится через устройство по умолчанию
-2. **Отсутствие звука**: Проверьте, что в системе действительно воспроизводится звук
-3. **Права доступа**: Некоторые приложения могут блокировать захват звука
+**Possible causes:**
+1. **Wrong output device**: Ensure audio is played through the default device
+2. **No audio**: Verify that there is audio playing in the system
+3. **Permissions**: Some apps may block audio capture
 
-**Решение**: 
-- Переведите вывод звука в приложении на устройство по умолчанию
-- Увеличьте громкость системного звука
-- Перезапустите приложение с правами администратора
+**Solutions**: 
+- Route app audio output to the default device
+- Increase the system volume
+- Restart the app with administrator privileges
 
-### Проблема: Ошибки API
+### Problem: API errors
 
-**Решение**: 
-- Проверьте правильность API ключа в `.env` файле
-- Убедитесь, что у вас есть доступ к OpenAI API
-- Проверьте баланс аккаунта OpenAI
+**Solutions**: 
+- Check the API key in the `.env` file
+- Ensure you have access to the OpenAI API
+- Check your OpenAI account balance
 
-### Проблема: Низкое качество транскрибации
+### Problem: Low transcription quality
 
-**Решения**:
-- Увеличьте громкость системного звука
-- Уменьшите фоновый шум
-- Попробуйте другую модель Whisper (если доступна)
+**Solutions**:
+- Increase system volume
+- Reduce background noise
+- Try another Whisper model (if available)
 
-## Структура проекта
+## Project structure
 
 ```
 system_audio_copilot/
-├── main.py              # Основной CLI интерфейс
-├── audio_capture.py     # Захват системного звука через WASAPI
-├── stt.py              # Транскрибация через OpenAI Whisper
-├── llm.py              # AI подсказки через OpenAI Chat Completions
-├── requirements.txt    # Python зависимости
-├── .env               # Переменные окружения (создать самостоятельно)
-└── README.md          # Документация
+├── main.py              # Main CLI interface
+├── audio_capture.py     # System audio capture via WASAPI
+├── stt.py               # Transcription via OpenAI Whisper
+├── llm.py               # AI hints via OpenAI Chat Completions
+├── requirements.txt     # Python dependencies
+├── .env                 # Environment variables (create manually)
+└── README.md            # Documentation
 ```
 
-## Безопасность
+## Security
 
-- **API ключи**: Никогда не коммитьте файл `.env` в репозиторий
-- **Данные**: Аудио данные отправляются в OpenAI для обработки
-- **Приватность**: Убедитесь, что вы согласны с политикой конфиденциальности OpenAI
+- **API keys**: Never commit the `.env` file to the repository
+- **Data**: Audio data is sent to OpenAI for processing
+- **Privacy**: Ensure you agree with OpenAI's privacy policy
 
-## Лицензия
+## License
 
-Этот проект предназначен для образовательных и исследовательских целей. Используйте на свой страх и риск.
+This project is intended for educational and research purposes. Use at your own risk.
 
-## Поддержка
+## Support
 
-При возникновении проблем:
-1. Проверьте раздел "Устранение неполадок"
-2. Убедитесь, что все зависимости установлены корректно
-3. Проверьте логи ошибок в консоли (они выводятся в stderr с префиксом `[error]`)
+If you face issues:
+1. Check the "Troubleshooting" section
+2. Ensure all dependencies are installed correctly
+3. Check error logs in the console (printed to stderr with the `[error]` prefix)

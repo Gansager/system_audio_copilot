@@ -1,5 +1,5 @@
 """
-Модуль для получения подсказок от OpenAI Chat Completions.
+Module for obtaining hints from OpenAI Chat Completions.
 """
 
 import sys
@@ -9,28 +9,28 @@ from typing import Optional
 
 def make_hint(text: str, client: OpenAI, model: str = "gpt-4o-mini", temperature: float = 0.2) -> str:
     """
-    Получить краткую подсказку от AI ассистента.
+    Get a brief hint from the AI assistant.
     
     Args:
-        text: Текст для анализа
-        client: OpenAI клиент
-        model: Модель для использования
-        temperature: Температура генерации
+        text: Text to analyze
+        client: OpenAI client
+        model: Model to use
+        temperature: Generation temperature
     
     Returns:
-        str: Ответ ассистента
+        str: Assistant's response
     """
     if not text.strip():
         return ""
     
     try:
-        # Системный промпт для кратких подсказок
+        # System prompt for brief hints
         system_prompt = (
-            "Ты - полезный AI ассистент. Дай краткий, уверенный совет "
-            "(1-2 предложения), без воды и извинений. Отвечай на русском языке."
+            "You are a helpful AI assistant. Give a brief, confident suggestion "
+            "(1-2 sentences), no fluff or apologies. Answer in English."
         )
         
-        # Отправляем запрос
+        # Send request
         response = client.chat.completions.create(
             model=model,
             temperature=temperature,
@@ -40,12 +40,12 @@ def make_hint(text: str, client: OpenAI, model: str = "gpt-4o-mini", temperature
             ]
         )
         
-        # Извлекаем ответ
+        # Extract response
         if response.choices and len(response.choices) > 0:
             return response.choices[0].message.content.strip()
         else:
             return ""
             
     except Exception as e:
-        print(f"[error] Ошибка получения подсказки: {e}", file=sys.stderr)
+        print(f"[error] Failed to get hint: {e}", file=sys.stderr)
         return ""

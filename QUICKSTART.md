@@ -1,66 +1,66 @@
-# Быстрый старт - System Audio Copilot
+# Quick Start - System Audio Copilot
 
-## 🚀 Запуск за 3 шага
+## 🚀 Start in 3 steps
 
-### 1. Установка зависимостей
+### 1. Install dependencies
 ```bash
-# Создание виртуального окружения
+# Create a virtual environment
 python -m venv .venv
 
-# Активация (Windows)
+# Activate (Windows)
 .venv\Scripts\activate
 
-# Установка пакетов
+# Install packages
 pip install -r requirements.txt
 ```
 
-### 2. Настройка API ключа
+### 2. Set up API key
 ```bash
-# Скопируйте пример конфигурации
+# Copy example configuration
 copy env_example.txt .env
 
-# Отредактируйте .env файл и добавьте ваш OpenAI API ключ
+# Edit the .env file and add your OpenAI API key
 notepad .env
 ```
 
-### 3. Запуск
+### 3. Run
 ```bash
-# Простой запуск
+# Simple run
 python main.py
 
-# Или используйте batch файл (Windows)
+# Or use the batch file (Windows)
 run.bat
 ```
 
-## 🎯 Что происходит
+## 🎯 What happens
 
-1. **Запуск**: Приложение начинает слушать системный звук
-2. **Live транскрипция**: Каждые 3 секунды печатает распознанный текст
-3. **AI подсказки**: Нажмите Enter для получения подсказки от AI
-4. **Выход**: Ctrl+C для корректного завершения
+1. **Start**: The app begins listening to system audio
+2. **Live transcription**: Every 3 seconds it prints recognized text
+3. **AI hints**: Press Enter to get a hint from AI
+4. **Exit**: Ctrl+C to quit cleanly
 
-## 🔧 Полезные команды
+## 🔧 Useful commands
 
 ```bash
-# Увеличенный интервал транскрибации
+# Increase transcription interval
 python main.py --window-sec 5
 
-# Режим "только по Enter" (без live транскрипции)
+# "Enter-only" mode (no live transcription)
 python main.py --enter-only
 
-# Помощь по параметрам
+# Help
 python main.py --help
 ```
 
-## ⚠️ Важные моменты
+## ⚠️ Important notes
 
-- **Устройство вывода**: Убедитесь, что звук воспроизводится через устройство по умолчанию
-- **API ключ**: Получите ключ на https://platform.openai.com/api-keys
-- **Права доступа**: При необходимости запустите с правами администратора
+- **Output device**: Ensure audio is played through the default device
+- **API key**: Get a key at https://platform.openai.com/api-keys
+- **Permissions**: If needed, run as administrator
 
-## 🆘 Если что-то не работает
+## 🆘 If something doesn't work
 
-1. Проверьте, что у вас есть активное устройство вывода звука
-2. Убедитесь, что в системе воспроизводится звук
-3. Проверьте правильность API ключа в `.env` файле
-4. Посмотрите сообщения об ошибках в консоли (они начинаются с `[error]`)
+1. Verify you have an active audio output device
+2. Ensure audio is playing in the system
+3. Check the API key in the `.env` file
+4. See error messages in the console (they start with `[error]`)
