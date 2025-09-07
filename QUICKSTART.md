@@ -2,7 +2,18 @@
 
 ## 🚀 Start in 3 steps
 
-### 1. Install dependencies
+### Option A: Download prebuilt .exe
+1. Download `SystemAudioCopilot.exe` from Releases
+2. Copy `env_example.txt` to the same folder and rename to `.env`
+3. Add your `OPENAI_API_KEY` to `.env`
+4. Run:
+```powershell
+./SystemAudioCopilot.exe
+```
+
+### Option B: Build from source
+
+#### 1. Install dependencies
 ```bash
 # Create a virtual environment
 python -m venv .venv
@@ -14,7 +25,7 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-### 2. Set up API key
+#### 2. Set up API key
 ```bash
 # Copy example configuration
 copy env_example.txt .env
@@ -23,7 +34,7 @@ copy env_example.txt .env
 notepad .env
 ```
 
-### 3. Run
+#### 3. Run
 ```bash
 # Simple run
 python main.py
@@ -35,7 +46,7 @@ run.bat
 ## 🎯 What happens
 
 1. **Start**: The app begins listening to system audio
-2. **Live transcription**: Every 3 seconds it prints recognized text
+2. **Live transcription**: Every 2 seconds it prints recognized text (gated by VAD to skip silence)
 3. **AI hints**: Press Enter to get a hint from AI
 4. **Exit**: Ctrl+C to quit cleanly
 
@@ -44,6 +55,9 @@ run.bat
 ```bash
 # Increase transcription interval
 python main.py --window-sec 5
+
+# Adjust VAD sub-frames and gating sensitivity
+python main.py --vad-frame-ms 50 --vad-min-voiced-ratio 0.2
 
 # "Enter-only" mode (no live transcription)
 python main.py --enter-only
