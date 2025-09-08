@@ -48,7 +48,8 @@ def load_config():
         "api_key": api_key,
         "model_transcribe": os.getenv("MODEL_TRANSCRIBE", "whisper-1"),
         "model_hints": os.getenv("MODEL_HINTS", "gpt-4o-mini"),
-        "temperature": float(os.getenv("TEMPERATURE", "0.2"))
+        "temperature": float(os.getenv("TEMPERATURE", "0.2")),
+        "dev_logs": str(os.getenv("DEV_LOGS", "0")).strip().lower() in ("1", "true", "yes", "on")
     }
 
 
@@ -152,20 +153,23 @@ def handle_enter_input(
     """
     with since_enter_lock:
         if not since_enter_text:
-            print("[warning] No accumulated text to send")
+            if config.get("dev_logs"):
+                print("[warning] No accumulated text to send")
             return
         
-        # Join all accumulated text
-        full_text = " ".join(since_enter_text).strip()
+        # Send only the last up to 3 recognized blocks
+        tail_blocks = since_enter_text[-3:] if len(since_enter_text) > 3 else list(since_enter_text)
+        full_text = " ".join(tail_blocks).strip()
         
         # Clear the buffer
         since_enter_text.clear()
     
     if not full_text:
-        print("[warning] No accumulated text to send")
+        if config.get("dev_logs"):
+            print("[warning] No accumulated text to send")
         return
     
-    print(f"[sending] Sending text: {full_text[:100]}{'...' if len(full_text) > 100 else ''}")
+    print(f"[sending] Sending text: {full_text}")
     
     # Get a hint from AI
     hint = make_hint(

@@ -1,16 +1,19 @@
 import sys
+import os
 
 def main():
     try:
         import pyaudio  # type: ignore
     except Exception as e:
-        print(f"[warning] PyAudio not available: {e}")
+        if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+            print(f"[warning] PyAudio not available: {e}")
         pyaudio = None  # type: ignore
 
     try:
         import sounddevice as sd  # type: ignore
     except Exception as e:
-        print(f"[warning] sounddevice not available: {e}")
+        if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+            print(f"[warning] sounddevice not available: {e}")
         sd = None  # type: ignore
 
     if pyaudio is not None:
