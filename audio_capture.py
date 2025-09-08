@@ -3,6 +3,7 @@ Module for capturing system audio via WASAPI loopback.
 """
 
 import sys
+import os
 import threading
 import time
 import numpy as np
@@ -146,7 +147,8 @@ class SystemAudioListener:
                     loopback_device = self.input_device_index
                     print(f"[info] Using specified device index: {sel_device_info['name']} (#{self.input_device_index})", file=sys.stderr)
                 except Exception as e:
-                    print(f"[warning] Provided input device index is unavailable: {e}. Ignoring.", file=sys.stderr)
+                    if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+                        print(f"[warning] Provided input device index is unavailable: {e}. Ignoring.", file=sys.stderr)
 
             # Adjust sample rate and channels to the device
             try:
@@ -220,7 +222,40 @@ class SystemAudioListener:
                     raise RuntimeError("No available output device found for loopback")
 
             # Create an input stream with loopback=True on the output device
-            wasapi_settings = sd.WasapiSettings(loopback=True)  # type: ignore
+            # Guard older sounddevice versions which may not support the signature
+            wasapi_settings = None
+            try:
+                wasapi_settings = sd.WasapiSettings(loopback=True)  # type: ignore
+            except TypeError as e:
+                # Try alternative: create and set attribute if available
+                try:
+                    tmp_settings = sd.WasapiSettings()  # type: ignore
+                    try:
+                        setattr(tmp_settings, "loopback", True)
+                        wasapi_settings = tmp_settings
+                        if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+                            print(
+                                f"[warning] sounddevice.WasapiSettings(loopback=True) unsupported on this version ({getattr(sd, '__version__', 'unknown')}); used attribute-based loopback instead",
+                                file=sys.stderr,
+                            )
+                    except Exception:
+                        raise
+                except Exception as e2:
+                    sd_ver = getattr(sd, "__version__", "unknown")
+                    if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+                        print(
+                            f"[warning] sounddevice WasapiSettings not supported (version {sd_ver}). {type(e).__name__}: {e}. Falling back to PyAudio.",
+                            file=sys.stderr,
+                        )
+                    print(
+                        "[info] Falling back to standard PyAudio loopback path (expected on older libs)",
+                        file=sys.stderr,
+                    )
+                    # Fallback to PyAudio
+                    self.use_wasapi_loopback = False
+                    self._safe_close_sd_stream()
+                    self.start_recording()
+                    return
 
             # For stability use 2 channels and then mix down to mono if needed
             sd_channels = max(1, self.channels)
@@ -241,7 +276,16 @@ class SystemAudioListener:
             print(f"[info] WASAPI loopback enabled. Output device: {selected_output_name}", file=sys.stderr)
 
         except Exception as e:
-            print(f"[warning] Failed to start WASAPI loopback: {e}. Falling back to PyAudio.", file=sys.stderr)
+            sd_ver = getattr(sd, "__version__", "unknown")
+            if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+                print(
+                    f"[warning] Failed to start WASAPI loopback (sounddevice {sd_ver}): {e}.",
+                    file=sys.stderr,
+                )
+            print(
+                "[info] Falling back to standard PyAudio loopback path (expected on older libs)",
+                file=sys.stderr,
+            )
             # Fallback to PyAudio
             self.use_wasapi_loopback = False
             self._safe_close_sd_stream()
@@ -313,6 +357,30 @@ class SystemAudioListener:
             self.stream_channels = 2 if self.channels == 1 else max(1, self.channels)
 
             # Open an input stream as loopback from the selected output device (via StreamInfo)
+            # Guard against older pyaudiowpatch versions missing WASAPI helpers
+            if not hasattr(pyaudio_wasapi, "PaWasapiStreamInfo") or not hasattr(pyaudio_wasapi, "paWinWasapiLoopback"):
+                paw_ver = getattr(pyaudio_wasapi, "__version__", "unknown")
+                if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+                    print(
+                        f"[warning] PyAudioWPatch missing PaWasapiStreamInfo (version {paw_ver}). Please upgrade pyaudiowpatch>=0.2.12.",
+                        file=sys.stderr,
+                    )
+                # Try sounddevice path if available
+                if HAVE_SD:
+                    try:
+                        self._start_recording_sounddevice_loopback()
+                        return
+                    except Exception:
+                        pass
+                # Fallback to PyAudio
+                print(
+                    "[info] Falling back to standard PyAudio loopback path (expected on older libs)",
+                    file=sys.stderr,
+                )
+                self.use_wasapi_loopback = False
+                self.start_recording()
+                return
+
             wasapi_info = pyaudio_wasapi.PaWasapiStreamInfo(  # type: ignore
                 flags=pyaudio_wasapi.paWinWasapiLoopback  # type: ignore
             )
@@ -338,7 +406,12 @@ class SystemAudioListener:
             print(f"[info] Effective rate: {self.samplerate} Hz, channels: {self.stream_channels}", file=sys.stderr)
 
         except Exception as e:
-            print(f"[warning] Failed to start WASAPI loopback (PyAudioWPatch): {e}. Trying fallback modes.", file=sys.stderr)
+            paw_ver = getattr(pyaudio_wasapi, "__version__", "unknown")
+            if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+                print(
+                    f"[warning] Failed to start WASAPI loopback (PyAudioWPatch {paw_ver}): {e}. Trying fallback modes.",
+                    file=sys.stderr,
+                )
             # Try sounddevice
             if HAVE_SD:
                 try:
@@ -348,6 +421,10 @@ class SystemAudioListener:
                     pass
             # Otherwise fallback to regular PyAudio
             self.use_wasapi_loopback = False
+            print(
+                "[info] Falling back to standard PyAudio loopback path (expected on older libs)",
+                file=sys.stderr,
+            )
             self.start_recording()
     
     def stop_recording(self):
@@ -375,7 +452,8 @@ class SystemAudioListener:
         """Callback function for processing audio data."""
         try:
             if status:
-                print(f"[warning] Audio stream status: {status}", file=sys.stderr)
+                if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+                    print(f"[warning] Audio stream status: {status}", file=sys.stderr)
             
             if in_data:
                 # Convert bytes to numpy float32 array
@@ -407,7 +485,8 @@ class SystemAudioListener:
         """Callback for sounddevice (WASAPI loopback)."""
         try:
             if status:
-                print(f"[warning] Audio stream status (sd): {status}", file=sys.stderr)
+                if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+                    print(f"[warning] Audio stream status (sd): {status}", file=sys.stderr)
 
             if indata is not None:
                 audio_data = np.array(indata, dtype=np.float32, copy=False)
