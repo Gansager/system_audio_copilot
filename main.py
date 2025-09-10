@@ -475,6 +475,17 @@ def main():
             daemon=True
         )
         transcription_thread.start()
+        # Optional dev watchdog log for stream activity
+        if config.get("dev_logs"):
+            def _periodic_status():
+                while True:
+                    try:
+                        time.sleep(3.0)
+                        active = audio_listener.is_stream_active()
+                        print(f"[debug] stream active={active} sr={audio_listener.samplerate} ch={audio_listener.stream_channels}", file=sys.stderr)
+                    except Exception:
+                        break
+            threading.Thread(target=_periodic_status, daemon=True).start()
         
         # Main input loop
         while True:

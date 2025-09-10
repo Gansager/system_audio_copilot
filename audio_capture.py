@@ -63,6 +63,9 @@ class SystemAudioListener:
         self._pa_continue = pyaudio.paContinue
         self._pa_abort = pyaudio.paAbort
         self.stream_channels = channels  # actual number of channels in opened stream
+        self.cb_error_count = 0
+        self._watchdog_thread = None
+        self._restart_guard = threading.Lock()
 
         # Loopback settings
         self.use_wasapi_loopback = bool(use_wasapi_loopback)
@@ -165,6 +168,9 @@ class SystemAudioListener:
             except Exception:
                 dev_sr = self.samplerate
             self.samplerate = dev_sr
+            # Recompute frame size and ring limits after samplerate change
+            self.frame_size = int(self.samplerate * self.frame_duration_ms / 1000)
+            self._update_session_block_limit()
             max_in = int(sel_device_info.get('maxInputChannels', self.channels))  # type: ignore
             self.stream_channels = max(1, min(self.channels, max_in) if max_in > 0 else self.channels)
 
@@ -185,6 +191,8 @@ class SystemAudioListener:
             self.is_recording = True
             self.stream.start_stream()
             print("[info] System audio recording started", file=sys.stderr)
+            # Start watchdog
+            self._start_watchdog_if_needed()
 
         except Exception as e:
             raise RuntimeError(f"Failed to start recording: {e}")
@@ -361,6 +369,9 @@ class SystemAudioListener:
             except Exception:
                 dev_sr = self.samplerate
             self.samplerate = dev_sr
+            # Recompute frame size and ring limits after samplerate change
+            self.frame_size = int(self.samplerate * self.frame_duration_ms / 1000)
+            self._update_session_block_limit()
 
             # For reliability open 2 channels, then mix down to mono if needed
             self.stream_channels = 2 if self.channels == 1 else max(1, self.channels)
@@ -413,6 +424,7 @@ class SystemAudioListener:
             self.stream.start_stream()
             print(f"[info] WASAPI loopback enabled (PyAudioWPatch). Output device: {selected_output_name}", file=sys.stderr)
             print(f"[info] Effective rate: {self.samplerate} Hz, channels: {self.stream_channels}", file=sys.stderr)
+            self._start_watchdog_if_needed()
 
         except Exception as e:
             paw_ver = getattr(pyaudio_wasapi, "__version__", "unknown")
@@ -442,6 +454,7 @@ class SystemAudioListener:
             return
         
         self.is_recording = False
+        # Watchdog will quit on next loop
         
         if self.stream:
             if self.backend == "pyaudio":
@@ -467,10 +480,23 @@ class SystemAudioListener:
             if in_data:
                 # Convert bytes to numpy float32 array
                 audio_data = np.frombuffer(in_data, dtype=np.float32)
-                
-                # If stereo, convert to mono
-                if self.channels == 2:
-                    audio_data = audio_data.reshape(-1, 2).mean(axis=1)
+                # Shape to (frames, channels) based on actual stream channels
+                if self.stream_channels >= 2:
+                    try:
+                        audio_data = audio_data.reshape(-1, self.stream_channels).mean(axis=1)
+                    except Exception as e:
+                        # Fallback: best-effort mono conversion
+                        if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+                            print(f"[warning] Reshape failed in callback: {e}. Falling back to 1D flatten.", file=sys.stderr)
+                        audio_data = audio_data.reshape(-1)
+                else:
+                    audio_data = audio_data.reshape(-1)
+
+                if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+                    try:
+                        print(f"[debug] cb frames={frame_count} len={len(audio_data)} stream_ch={self.stream_channels} fs={self.frame_size} sr={self.samplerate}", file=sys.stderr)
+                    except Exception:
+                        pass
                 
                 with self.lock:
                     # Append to both buffers
@@ -490,11 +516,14 @@ class SystemAudioListener:
                         if max_blocks > 0 and len(self.session_ring_buffer) > max_blocks:
                             self.session_ring_buffer = self.session_ring_buffer[-max_blocks:]
             
+            self.cb_error_count = 0
             return (None, self._pa_continue)
             
         except Exception as e:
             print(f"[error] Error in audio callback: {e}", file=sys.stderr)
-            return (None, self._pa_abort)
+            # Do not abort stream on single error; allow watchdog to handle persistent failures
+            self.cb_error_count += 1
+            return (None, self._pa_continue)
 
     def _sd_callback(self, indata, frames, time_info, status):  # type: ignore
         """Callback for sounddevice (WASAPI loopback)."""
@@ -505,12 +534,14 @@ class SystemAudioListener:
 
             if indata is not None:
                 audio_data = np.array(indata, dtype=np.float32, copy=False)
-                # Normalize to (N,) float32
+                # Convert to mono 1D float32
                 if audio_data.ndim == 2:
-                    if self.channels == 1:
-                        audio_data = audio_data.mean(axis=1)
-                    else:
-                        # Leave as is, then flatten to 1D
+                    try:
+                        if audio_data.shape[1] >= 2:
+                            audio_data = audio_data.mean(axis=1)
+                        else:
+                            audio_data = audio_data.reshape(-1)
+                    except Exception:
                         audio_data = audio_data.reshape(-1)
                 else:
                     audio_data = audio_data.reshape(-1)
@@ -529,8 +560,10 @@ class SystemAudioListener:
                         max_blocks = self.max_session_blocks
                         if max_blocks > 0 and len(self.session_ring_buffer) > max_blocks:
                             self.session_ring_buffer = self.session_ring_buffer[-max_blocks:]
+            self.cb_error_count = 0
         except Exception as e:
             print(f"[error] Error in sd callback: {e}", file=sys.stderr)
+            self.cb_error_count += 1
 
     def _safe_close_sd_stream(self):
         try:
@@ -539,6 +572,85 @@ class SystemAudioListener:
                 self.stream.close()
         except Exception:
             pass
+
+    def is_stream_active(self) -> bool:
+        """
+        Check whether the underlying stream is active.
+        """
+        try:
+            if self.stream is None:
+                return False
+            if self.backend == "pyaudio":
+                try:
+                    return bool(self.stream.is_active())
+                except Exception:
+                    return True  # best effort
+            elif self.backend == "sounddevice":
+                try:
+                    # sounddevice streams have .active property
+                    return bool(getattr(self.stream, 'active', True))
+                except Exception:
+                    return True
+            return True
+        except Exception:
+            return True
+
+    def _start_watchdog_if_needed(self):
+        if self._watchdog_thread is not None and self._watchdog_thread.is_alive():
+            return
+        def _loop():
+            while True:
+                if not self.is_recording:
+                    break
+                time.sleep(2.0)
+                try:
+                    active = self.is_stream_active()
+                    if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+                        print(f"[debug] watchdog active={active} backend={self.backend} cb_errs={self.cb_error_count}", file=sys.stderr)
+                    if not active or self.cb_error_count >= 5:
+                        if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+                            print("[warning] Stream inactive or repeated callback errors. Attempting restart...", file=sys.stderr)
+                        self._restart_stream()
+                except Exception:
+                    pass
+        self._watchdog_thread = threading.Thread(target=_loop, daemon=True)
+        self._watchdog_thread.start()
+
+    def _restart_stream(self):
+        """
+        Attempt to restart the audio stream in-place.
+        """
+        if not self._restart_guard.acquire(blocking=False):
+            return
+        try:
+            # Close any existing stream
+            try:
+                if self.stream is not None:
+                    if self.backend == "pyaudio":
+                        self.stream.stop_stream()
+                        self.stream.close()
+                    elif self.backend == "sounddevice":
+                        self._safe_close_sd_stream()
+            except Exception:
+                pass
+
+            # Keep is_recording True and start a new stream
+            prev_backend = self.backend
+            self.stream = None
+            # Use current settings; start_recording will pick best path
+            # Temporarily mark not recording to bypass early return
+            self.is_recording = False
+            self.start_recording()
+            if os.getenv("DEV_LOGS", "0").strip().lower() in ("1", "true", "yes", "on"):
+                print(f"[info] Stream restarted (was {prev_backend}, now {self.backend})", file=sys.stderr)
+            self.cb_error_count = 0
+        except Exception as e:
+            print(f"[warning] Stream restart failed: {e}", file=sys.stderr)
+        finally:
+            try:
+                self._restart_guard.release()
+            except Exception:
+                pass
     
     def get_chunk_and_clear(self) -> np.ndarray:
         """
