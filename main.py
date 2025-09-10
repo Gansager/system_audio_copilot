@@ -205,6 +205,7 @@ def prompt_and_save_session(
     save_dir_opt: str,
     save_audio_seconds: int,
     save_audio_mode: str,
+    mix_gain_mode: str,
     session_start_ts: float
 ) -> None:
     """
@@ -272,9 +273,12 @@ def prompt_and_save_session(
         return
 
     # Save audio: last N seconds from both sources
-    save_mode = (save_audio_mode or "separate").strip().lower()
+    save_mode = (save_audio_mode or "mix").strip().lower()
     if save_mode not in ("separate", "mix", "both"):
-        save_mode = "separate"
+        save_mode = "mix"
+    mix_gain_mode = (mix_gain_mode or "fixed").strip().lower()
+    if mix_gain_mode not in ("fixed", "normalize"):
+        mix_gain_mode = "fixed"
 
     system_audio = np.array([], dtype=np.float32)
     mic_audio = np.array([], dtype=np.float32)
@@ -342,29 +346,38 @@ def prompt_and_save_session(
                 y = np.interp(t_to, t_from, x.astype(np.float32))
                 return y.astype(np.float32)
 
-            def _align_by_tail(a: np.ndarray, b: np.ndarray) -> tuple:
+            def _align_min_by_tail(a: np.ndarray, b: np.ndarray) -> tuple:
                 la = len(a)
                 lb = len(b)
-                L = max(la, lb)
-                pad_a = L - la
-                pad_b = L - lb
-                if pad_a > 0:
-                    a = np.concatenate([np.zeros((pad_a,), dtype=np.float32), a], axis=0)
-                if pad_b > 0:
-                    b = np.concatenate([np.zeros((pad_b,), dtype=np.float32), b], axis=0)
-                return a, b
+                if la == 0 or lb == 0:
+                    return a, b
+                L = min(la, lb)
+                return a[-L:], b[-L:]
 
             have_sys = system_sr is not None and len(system_audio) > 0
             have_mic = mic_sr is not None and len(mic_audio) > 0
+            applied_gain = "none"
             if have_sys and have_mic:
-                target_sr = max(system_sr or 16000, mic_sr or 16000)
+                # Prefer system sample rate as target; fallback to mic
+                target_sr = int(system_sr if system_sr is not None else mic_sr)
                 a = _resample_linear(system_audio, int(system_sr), int(target_sr)) if have_sys else np.zeros((0,), dtype=np.float32)
                 b = _resample_linear(mic_audio, int(mic_sr), int(target_sr)) if have_mic else np.zeros((0,), dtype=np.float32)
-                a, b = _align_by_tail(a, b)
-                mix = a + b
-                peak = float(np.max(np.abs(mix))) if len(mix) > 0 else 0.0
-                if peak > 1.0:
-                    mix = (mix / peak).astype(np.float32)
+                a, b = _align_min_by_tail(a, b)
+                if mix_gain_mode == "fixed":
+                    g = 0.70710678  # -3 dB per source
+                    mix = (a * g) + (b * g)
+                    applied_gain = "fixed(-3dB each)"
+                else:
+                    mix = a + b
+                    peak = float(np.max(np.abs(mix))) if len(mix) > 0 else 0.0
+                    if peak > 0:
+                        mix = (mix / peak * 0.999).astype(np.float32)
+                        applied_gain = "normalize(0dB to 0.999)"
+                    else:
+                        applied_gain = "normalize(no-op)"
+                # Final clip to safety
+                if len(mix) > 0:
+                    mix = np.clip(mix, -1.0, 1.0).astype(np.float32)
                 write_wav_file(mix_path, mix, int(target_sr))
                 mix_saved = True
             elif have_sys:
@@ -372,10 +385,12 @@ def prompt_and_save_session(
                 target_sr = int(system_sr)
                 write_wav_file(mix_path, system_audio, target_sr)
                 mix_saved = True
+                applied_gain = "passthrough(system)"
             elif have_mic:
                 target_sr = int(mic_sr)
                 write_wav_file(mix_path, mic_audio, target_sr)
                 mix_saved = True
+                applied_gain = "passthrough(mic)"
             else:
                 print("[warning] No audio from either source to create a mix", file=sys.stderr)
         except Exception as e:
@@ -389,7 +404,16 @@ def prompt_and_save_session(
             f.write("==============================\n\n")
             f.write(f"Start: {start_dt.isoformat()}\n")
             f.write(f"End:   {end_dt.isoformat()}\n")
-            f.write(f"Sample rate: {audio_listener.samplerate} Hz\n")
+            try:
+                sys_sr_str = (str(system_sr) + " Hz") if system_sr is not None else "n/a"
+            except Exception:
+                sys_sr_str = "n/a"
+            try:
+                mic_sr_str = (str(mic_sr) + " Hz") if mic_sr is not None else "n/a"
+            except Exception:
+                mic_sr_str = "n/a"
+            f.write(f"System sample rate: {sys_sr_str}\n")
+            f.write(f"Mic sample rate: {mic_sr_str}\n")
             f.write(f"Saved audio seconds: {int(save_audio_seconds)}\n")
             f.write("\n")
 
@@ -429,7 +453,13 @@ def prompt_and_save_session(
             if mic_saved:
                 print(f"[info]  - microphone audio: {os.path.abspath(mic_path)}", file=sys.stderr)
         if save_mode in ("mix", "both") and mix_saved:
-            print(f"[info]  - mixed audio: {os.path.abspath(mix_path)}", file=sys.stderr)
+            # Print brief summary
+            try:
+                len_sys = len(system_audio) if system_audio is not None else 0
+                len_mic = len(mic_audio) if mic_audio is not None else 0
+                print(f"[info]  - mixed audio: {os.path.abspath(mix_path)} (sys_len={len_sys}, sys_sr={system_sr}, mic_len={len_mic}, mic_sr={mic_sr}, gain={applied_gain})", file=sys.stderr)
+            except Exception:
+                print(f"[info]  - mixed audio: {os.path.abspath(mix_path)}", file=sys.stderr)
         print(f"[info]  - transcript: {os.path.abspath(transcript_path)}", file=sys.stderr)
     except Exception:
         pass
@@ -555,6 +585,20 @@ def main():
         type=int,
         default=int(os.getenv("SAVE_AUDIO_SECONDS", "30")),
         help="Number of recent seconds of audio to save (default: 30)"
+    )
+    parser.add_argument(
+        "--save-audio-mode",
+        type=str,
+        choices=["separate", "mix", "both"],
+        default=os.getenv("SAVE_AUDIO_MODE", "mix"),
+        help="How to save audio on exit: separate files, mixed, or both (default: separate)"
+    )
+    parser.add_argument(
+        "--mix-gain-mode",
+        type=str,
+        choices=["fixed", "normalize"],
+        default=os.getenv("MIX_GAIN_MODE", "fixed"),
+        help="Mix gain strategy: fixed (-3 dB per source) or normalize to peak"
     )
     
     args = parser.parse_args()
@@ -704,12 +748,15 @@ def main():
         # Prompt and save session if requested
         try:
             prompt_and_save_session(
-                audio_listener=(audio_listener if audio_listener else mic_listener),
+                system_listener=audio_listener,
+                mic_listener=mic_listener,
                 session_text=session_text,
                 session_hints=session_hints,
                 save_on_exit_mode=str(args.save_on_exit),
                 save_dir_opt=str(args.save_dir),
                 save_audio_seconds=int(args.save_audio_seconds),
+                save_audio_mode=str(args.save_audio_mode),
+                mix_gain_mode=str(args.mix_gain_mode),
                 session_start_ts=session_start_ts,
             )
         except Exception as e:

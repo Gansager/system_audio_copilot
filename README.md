@@ -85,6 +85,7 @@ python main.py --help
  - `--save-on-exit {ask,yes,no}` - Save session on exit (default: `ask`)
  - `--save-dir PATH` - Directory for saved sessions (default: `./sessions`)
  - `--save-audio-seconds INT` - Recent audio seconds to save (default: `30`)
+ - `--save-audio-mode {separate,mix,both}` - Save separate files, mixed, or both (default: `separate`)
 
 ### Examples
 
@@ -106,6 +107,9 @@ python main.py --samplerate 22050
 
 # Auto-save session on exit to custom directory, keep 60s of audio
 python main.py --save-on-exit yes --save-dir sessions --save-audio-seconds 60
+
+# Save mixed audio too
+python main.py --save-on-exit yes --save-audio-mode both
 
 # Capture only mic
 python main.py --no-loopback

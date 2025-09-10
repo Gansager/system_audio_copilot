@@ -75,6 +75,9 @@ python main.py --no-loopback
 
 # Capture only system audio
 python main.py --no-mic
+
+# Save mixed audio too
+python main.py --save-on-exit yes --save-audio-mode both
 ```
 
 ## ⚠️ Important notes
