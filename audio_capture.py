@@ -757,3 +757,147 @@ class SystemAudioListener:
             self.audio.terminate()
 
 
+
+class MicrophoneListener:
+    """
+    Class for capturing microphone audio via standard input devices.
+    Uses PyAudio to capture microphone audio.
+    """
+    def __init__(self, samplerate: int = 16000, channels: int = 1, input_device_name: Optional[str] = None, input_device_index: Optional[int] = None, max_session_seconds: int = 30):
+        self.samplerate = samplerate
+        self.channels = channels
+        self.frame_duration_ms = 100
+        self.frame_size = int(samplerate * self.frame_duration_ms / 1000)
+
+        self.live_buffer = []
+        self.since_enter_buffer = []
+        self.session_ring_buffer = []
+
+        self.lock = threading.Lock()
+
+        self.is_recording = False
+        self.audio = None
+        self.stream = None
+        self.backend = "pyaudio"
+        self.pa_module = pyaudio
+        self._pa_continue = pyaudio.paContinue
+        self._pa_abort = pyaudio.paAbort
+        self.stream_channels = channels
+        self.cb_error_count = 0
+        self._watchdog_thread = None
+        self._restart_guard = threading.Lock()
+
+        self.input_device_name = input_device_name
+        self.input_device_index = input_device_index
+
+        try:
+            self.audio = pyaudio.PyAudio()
+            print(f"[info] PyAudio (mic) initialized", file=sys.stderr)
+        except Exception as e:
+            raise RuntimeError(f"Failed to initialize PyAudio (mic): {e}")
+
+        try:
+            self.max_session_seconds = max(0, int(max_session_seconds))
+        except Exception:
+            self.max_session_seconds = 30
+        self._update_session_block_limit()
+
+    def start_recording(self):
+        if self.is_recording:
+            return
+        try:
+            sel_device_info = None
+            sel_index = None
+
+            # If explicit index provided
+            if self.input_device_index is not None:
+                try:
+                    sel_device_info = self.audio.get_device_info_by_index(self.input_device_index)
+                    sel_index = self.input_device_index
+                    print(f"[info] Using microphone device index: {sel_device_info['name']} (#{self.input_device_index})", file=sys.stderr)
+                except Exception as e:
+                    print(f"[warning] Provided mic device index unavailable: {e}. Falling back to name/default.", file=sys.stderr)
+                    sel_device_info = None
+                    sel_index = None
+
+            # If by name substring
+            if sel_device_info is None and self.input_device_name:
+                name_lower = self.input_device_name.lower()
+                for i in range(self.audio.get_device_count()):
+                    dev = self.audio.get_device_info_by_index(i)
+                    if int(dev.get('maxInputChannels', 0)) > 0:
+                        dev_name = str(dev.get('name', ''))
+                        if name_lower in dev_name.lower():
+                            sel_device_info = dev
+                            sel_index = i
+                            print(f"[info] Selected microphone: {dev_name}", file=sys.stderr)
+                            break
+
+            # Default input device
+            if sel_device_info is None:
+                sel_device_info = self.audio.get_default_input_device_info()
+                sel_index = int(sel_device_info.get('index', 0))
+                print(f"[info] Using default microphone: {sel_device_info['name']}", file=sys.stderr)
+
+            try:
+                dev_sr = int(sel_device_info.get('defaultSampleRate', self.samplerate))  # type: ignore
+            except Exception:
+                dev_sr = self.samplerate
+            self.samplerate = dev_sr
+            self.frame_size = int(self.samplerate * self.frame_duration_ms / 1000)
+            self._update_session_block_limit()
+
+            max_in = int(sel_device_info.get('maxInputChannels', self.channels))  # type: ignore
+            self.stream_channels = max(1, min(self.channels, max_in) if max_in > 0 else self.channels)
+
+            self.stream = self.audio.open(
+                format=pyaudio.paFloat32,
+                channels=self.stream_channels,
+                rate=self.samplerate,
+                input=True,
+                input_device_index=sel_index,
+                frames_per_buffer=self.frame_size,
+                stream_callback=self._audio_callback
+            )
+            self.backend = "pyaudio"
+            self.is_recording = True
+            self.stream.start_stream()
+            print("[info] Microphone recording started", file=sys.stderr)
+            self._start_watchdog_if_needed()
+        except Exception as e:
+            raise RuntimeError(f"Failed to start microphone recording: {e}")
+
+    def stop_recording(self):
+        if not self.is_recording:
+            return
+        self.is_recording = False
+        if self.stream:
+            try:
+                self.stream.stop_stream()
+                self.stream.close()
+            except Exception:
+                pass
+            self.stream = None
+        print("[info] Microphone recording stopped", file=sys.stderr)
+
+    # Reuse the same callbacks and helpers as SystemAudioListener
+    _audio_callback = SystemAudioListener._audio_callback
+    _safe_close_sd_stream = SystemAudioListener._safe_close_sd_stream
+    is_stream_active = SystemAudioListener.is_stream_active
+    _start_watchdog_if_needed = SystemAudioListener._start_watchdog_if_needed
+    _restart_stream = SystemAudioListener._restart_stream
+    _sd_callback = SystemAudioListener._sd_callback
+    _update_session_block_limit = SystemAudioListener._update_session_block_limit
+    set_max_session_seconds = SystemAudioListener.set_max_session_seconds
+    get_recent_audio = SystemAudioListener.get_recent_audio
+    get_chunk_and_clear = SystemAudioListener.get_chunk_and_clear
+    get_since_last_enter_and_clear = SystemAudioListener.get_since_last_enter_and_clear
+
+    def __enter__(self):
+        self.start_recording()
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.stop_recording()
+        if self.audio:
+            self.audio.terminate()

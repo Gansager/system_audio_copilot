@@ -16,7 +16,7 @@ import numpy as np
 from dotenv import load_dotenv, find_dotenv
 from openai import OpenAI
 
-from audio_capture import SystemAudioListener
+from audio_capture import SystemAudioListener, MicrophoneListener
 from stt import transcribe_audio_chunk
 from llm import make_hint
 
@@ -74,7 +74,8 @@ def live_transcription_worker(
     vad_min_voiced_ratio: float,
     since_enter_text: list,
     since_enter_lock: threading.Lock,
-    session_text: list
+    session_text: list,
+    source_label: str
 ):
     """
     Background worker for live transcription.
@@ -133,7 +134,8 @@ def live_transcription_worker(
                     
                     # Print live transcription if not in enter_only mode
                     if not enter_only:
-                        print(f"[live] {transcribed_text}")
+                        prefix = "[Other]" if source_label == "system" else "[Me]"
+                        print(f"{prefix} {transcribed_text}")
                         sys.stdout.flush()
                         
         except Exception as e:
@@ -195,12 +197,14 @@ def handle_enter_input(
     else:
         print("[error] Failed to get assistant response")
 def prompt_and_save_session(
-    audio_listener: SystemAudioListener,
+    system_listener: Optional[SystemAudioListener],
+    mic_listener: Optional[MicrophoneListener],
     session_text: list,
     session_hints: list,
     save_on_exit_mode: str,
     save_dir_opt: str,
     save_audio_seconds: int,
+    save_audio_mode: str,
     session_start_ts: float
 ) -> None:
     """
@@ -267,24 +271,115 @@ def prompt_and_save_session(
         print(f"[warning] Failed to create session directory: {e}", file=sys.stderr)
         return
 
-    # Save audio: last N seconds
-    audio_path = os.path.join(session_dir, "session.wav")
-    try:
-        recent_audio = audio_listener.get_recent_audio(int(save_audio_seconds))
-    except Exception:
-        recent_audio = np.array([], dtype=np.float32)
+    # Save audio: last N seconds from both sources
+    save_mode = (save_audio_mode or "separate").strip().lower()
+    if save_mode not in ("separate", "mix", "both"):
+        save_mode = "separate"
 
-    audio_saved = False
-    if recent_audio is not None and len(recent_audio) > 0:
+    system_audio = np.array([], dtype=np.float32)
+    mic_audio = np.array([], dtype=np.float32)
+    system_sr = None
+    mic_sr = None
+
+    # Collect recent audio
+    if system_listener is not None:
         try:
-            from stt import write_wav_file
-            write_wav_file(audio_path, recent_audio, int(audio_listener.samplerate))
-            audio_saved = True
+            system_audio = system_listener.get_recent_audio(int(save_audio_seconds))
+            system_sr = int(system_listener.samplerate)
+        except Exception:
+            system_audio = np.array([], dtype=np.float32)
+            system_sr = None
+    if mic_listener is not None:
+        try:
+            mic_audio = mic_listener.get_recent_audio(int(save_audio_seconds))
+            mic_sr = int(mic_listener.samplerate)
+        except Exception:
+            mic_audio = np.array([], dtype=np.float32)
+            mic_sr = None
+
+    from stt import write_wav_file
+
+    # Separate saves
+    system_path = os.path.join(session_dir, "session_system.wav")
+    mic_path = os.path.join(session_dir, "session_mic.wav")
+    system_saved = False
+    mic_saved = False
+    if save_mode in ("separate", "both"):
+        if system_sr is not None and system_audio is not None and len(system_audio) > 0:
+            try:
+                write_wav_file(system_path, system_audio, system_sr)
+                system_saved = True
+            except Exception as e:
+                print(f"[warning] Failed to save system audio: {e}", file=sys.stderr)
+        else:
+            if system_listener is not None:
+                print("[warning] No recent system audio to save for the selected interval", file=sys.stderr)
+        if mic_sr is not None and mic_audio is not None and len(mic_audio) > 0:
+            try:
+                write_wav_file(mic_path, mic_audio, mic_sr)
+                mic_saved = True
+            except Exception as e:
+                print(f"[warning] Failed to save microphone audio: {e}", file=sys.stderr)
+        else:
+            if mic_listener is not None:
+                print("[warning] No recent microphone audio to save for the selected interval", file=sys.stderr)
+
+    # Mix mode
+    mix_saved = False
+    mix_path = os.path.join(session_dir, "session_mix.wav")
+    if save_mode in ("mix", "both"):
+        try:
+            def _resample_linear(x: np.ndarray, sr_from: int, sr_to: int) -> np.ndarray:
+                if len(x) == 0 or sr_from == sr_to:
+                    return x.copy()
+                duration = len(x) / float(sr_from)
+                n_to = int(round(duration * sr_to))
+                if n_to <= 1:
+                    return np.zeros((0,), dtype=np.float32)
+                # np.interp expects x-axis
+                t_from = np.linspace(0.0, duration, num=len(x), endpoint=False)
+                t_to = np.linspace(0.0, duration, num=n_to, endpoint=False)
+                y = np.interp(t_to, t_from, x.astype(np.float32))
+                return y.astype(np.float32)
+
+            def _align_by_tail(a: np.ndarray, b: np.ndarray) -> tuple:
+                la = len(a)
+                lb = len(b)
+                L = max(la, lb)
+                pad_a = L - la
+                pad_b = L - lb
+                if pad_a > 0:
+                    a = np.concatenate([np.zeros((pad_a,), dtype=np.float32), a], axis=0)
+                if pad_b > 0:
+                    b = np.concatenate([np.zeros((pad_b,), dtype=np.float32), b], axis=0)
+                return a, b
+
+            have_sys = system_sr is not None and len(system_audio) > 0
+            have_mic = mic_sr is not None and len(mic_audio) > 0
+            if have_sys and have_mic:
+                target_sr = max(system_sr or 16000, mic_sr or 16000)
+                a = _resample_linear(system_audio, int(system_sr), int(target_sr)) if have_sys else np.zeros((0,), dtype=np.float32)
+                b = _resample_linear(mic_audio, int(mic_sr), int(target_sr)) if have_mic else np.zeros((0,), dtype=np.float32)
+                a, b = _align_by_tail(a, b)
+                mix = a + b
+                peak = float(np.max(np.abs(mix))) if len(mix) > 0 else 0.0
+                if peak > 1.0:
+                    mix = (mix / peak).astype(np.float32)
+                write_wav_file(mix_path, mix, int(target_sr))
+                mix_saved = True
+            elif have_sys:
+                # Only system available; if mode is mix-only, still save as mix for convenience
+                target_sr = int(system_sr)
+                write_wav_file(mix_path, system_audio, target_sr)
+                mix_saved = True
+            elif have_mic:
+                target_sr = int(mic_sr)
+                write_wav_file(mix_path, mic_audio, target_sr)
+                mix_saved = True
+            else:
+                print("[warning] No audio from either source to create a mix", file=sys.stderr)
         except Exception as e:
-            print(f"[warning] Failed to save audio: {e}", file=sys.stderr)
-            audio_saved = False
-    else:
-        print("[warning] No recent audio to save for the selected interval", file=sys.stderr)
+            print(f"[warning] Failed to create/save mixed audio: {e}", file=sys.stderr)
 
     # Save transcript
     transcript_path = os.path.join(session_dir, "transcript.txt")
@@ -328,8 +423,13 @@ def prompt_and_save_session(
     # Print resulting paths
     try:
         print(f"[info] Saved session to: {os.path.abspath(session_dir)}", file=sys.stderr)
-        if audio_saved:
-            print(f"[info]  - audio: {os.path.abspath(audio_path)}", file=sys.stderr)
+        if save_mode in ("separate", "both"):
+            if system_saved:
+                print(f"[info]  - system audio: {os.path.abspath(system_path)}", file=sys.stderr)
+            if mic_saved:
+                print(f"[info]  - microphone audio: {os.path.abspath(mic_path)}", file=sys.stderr)
+        if save_mode in ("mix", "both") and mix_saved:
+            print(f"[info]  - mixed audio: {os.path.abspath(mix_path)}", file=sys.stderr)
         print(f"[info]  - transcript: {os.path.abspath(transcript_path)}", file=sys.stderr)
     except Exception:
         pass
@@ -367,6 +467,11 @@ def main():
         help="Capture via WASAPI loopback (listen to the output device, what you hear). Enabled by default"
     )
     parser.add_argument(
+        "--no-loopback",
+        action="store_true",
+        help="Disable system audio (loopback) capture"
+    )
+    parser.add_argument(
         "--output-device",
         type=str,
         default=None,
@@ -377,6 +482,42 @@ def main():
         type=int,
         default=None,
         help="Explicit input device index (PyAudio) for capture. Useful for selecting [Loopback]"
+    )
+    # Microphone options
+    parser.add_argument(
+        "--capture-mic",
+        action="store_true",
+        default=True,
+        help="Enable microphone capture (on by default)"
+    )
+    parser.add_argument(
+        "--no-mic",
+        action="store_true",
+        help="Disable microphone capture"
+    )
+    parser.add_argument(
+        "--mic-index",
+        type=int,
+        default=None,
+        help="Explicit microphone device index"
+    )
+    parser.add_argument(
+        "--mic-device",
+        type=str,
+        default=None,
+        help="Microphone device name substring"
+    )
+    parser.add_argument(
+        "--mic-samplerate",
+        type=int,
+        default=None,
+        help="Microphone sample rate (default: same as --samplerate)"
+    )
+    parser.add_argument(
+        "--mic-channels",
+        type=int,
+        default=1,
+        help="Microphone channels (1 or 2, default: 1)"
     )
     parser.add_argument(
         "--vad-threshold",
@@ -426,7 +567,7 @@ def main():
     print(f"[info] Transcription interval: {args.window_sec} s", file=sys.stderr)
     print(f"[info] Sample rate: {args.samplerate} Hz", file=sys.stderr)
     print(f"[info] Mode: {'enter-only' if args.enter_only else 'live transcription'}", file=sys.stderr)
-    if args.loopback:
+    if args.loopback and not args.no_loopback:
         print(f"[info] Audio source: WASAPI loopback", file=sys.stderr)
         if args.output_device:
             print(f"[info] Output device for loopback: {args.output_device}", file=sys.stderr)
@@ -436,13 +577,26 @@ def main():
     print("=" * 60, file=sys.stderr)
     
     # Initialize audio listener
-    audio_listener = SystemAudioListener(
-        samplerate=args.samplerate,
-        use_wasapi_loopback=args.loopback,
-        output_device=args.output_device,
-        input_device_index=args.input_index,
-        max_session_seconds=int(args.save_audio_seconds)
-    )
+    enable_system = bool(args.loopback and not args.no_loopback)
+    enable_mic = bool(args.capture_mic and not args.no_mic)
+    audio_listener = None
+    mic_listener = None
+    if enable_system:
+        audio_listener = SystemAudioListener(
+            samplerate=args.samplerate,
+            use_wasapi_loopback=True,
+            output_device=args.output_device,
+            input_device_index=args.input_index,
+            max_session_seconds=int(args.save_audio_seconds)
+        )
+    if enable_mic:
+        mic_listener = MicrophoneListener(
+            samplerate=(args.mic_samplerate if args.mic_samplerate else args.samplerate),
+            channels=int(args.mic_channels),
+            input_device_name=args.mic_device,
+            input_device_index=args.mic_index,
+            max_session_seconds=int(args.save_audio_seconds)
+        )
     
     # Buffer for accumulating text since last Enter
     since_enter_text = []
@@ -454,35 +608,67 @@ def main():
     
     try:
         # Start audio recording
-        audio_listener.start_recording()
+        if audio_listener:
+            audio_listener.start_recording()
+        if mic_listener:
+            mic_listener.start_recording()
         
         # Start live transcription thread
-        transcription_thread = threading.Thread(
-            target=live_transcription_worker,
-            args=(
-                audio_listener,
-                client,
-                config,
-                args.window_sec,
-                args.enter_only,
-                args.vad_threshold,
-                args.vad_frame_ms,
-                args.vad_min_voiced_ratio,
-                since_enter_text,
-                since_enter_lock,
-                session_text
-            ),
-            daemon=True
-        )
-        transcription_thread.start()
+        threads = []
+        if audio_listener:
+            t_sys = threading.Thread(
+                target=live_transcription_worker,
+                args=(
+                    audio_listener,
+                    client,
+                    config,
+                    args.window_sec,
+                    args.enter_only,
+                    args.vad_threshold,
+                    args.vad_frame_ms,
+                    args.vad_min_voiced_ratio,
+                    since_enter_text,
+                    since_enter_lock,
+                    session_text,
+                    "system",
+                ),
+                daemon=True
+            )
+            t_sys.start()
+            threads.append(t_sys)
+        if mic_listener:
+            t_mic = threading.Thread(
+                target=live_transcription_worker,
+                args=(
+                    mic_listener,
+                    client,
+                    config,
+                    args.window_sec,
+                    args.enter_only,
+                    args.vad_threshold,
+                    args.vad_frame_ms,
+                    args.vad_min_voiced_ratio,
+                    since_enter_text,
+                    since_enter_lock,
+                    session_text,
+                    "mic",
+                ),
+                daemon=True
+            )
+            t_mic.start()
+            threads.append(t_mic)
         # Optional dev watchdog log for stream activity
         if config.get("dev_logs"):
             def _periodic_status():
                 while True:
                     try:
                         time.sleep(3.0)
-                        active = audio_listener.is_stream_active()
-                        print(f"[debug] stream active={active} sr={audio_listener.samplerate} ch={audio_listener.stream_channels}", file=sys.stderr)
+                        if audio_listener:
+                            active = audio_listener.is_stream_active()
+                            print(f"[debug] system active={active} sr={audio_listener.samplerate} ch={audio_listener.stream_channels}", file=sys.stderr)
+                        if mic_listener:
+                            active_m = mic_listener.is_stream_active()
+                            print(f"[debug] mic    active={active_m} sr={mic_listener.samplerate} ch={mic_listener.stream_channels}", file=sys.stderr)
                     except Exception:
                         break
             threading.Thread(target=_periodic_status, daemon=True).start()
@@ -505,11 +691,20 @@ def main():
         print(f"[error] Critical error: {e}", file=sys.stderr)
     finally:
         # Stop recording cleanly
-        audio_listener.stop_recording()
+        try:
+            if audio_listener:
+                audio_listener.stop_recording()
+        except Exception:
+            pass
+        try:
+            if mic_listener:
+                mic_listener.stop_recording()
+        except Exception:
+            pass
         # Prompt and save session if requested
         try:
             prompt_and_save_session(
-                audio_listener=audio_listener,
+                audio_listener=(audio_listener if audio_listener else mic_listener),
                 session_text=session_text,
                 session_hints=session_hints,
                 save_on_exit_mode=str(args.save_on_exit),

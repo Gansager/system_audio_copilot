@@ -5,6 +5,7 @@ Python CLI tool for Windows 11 that listens to system audio (WASAPI loopback) an
 ## Features
 
 - 🎧 **Capture system audio** via WASAPI loopback (not the microphone)
+- 🎙️ **Capture microphone** in parallel with system audio
 - 📝 **Live transcription** of system audio every 2 seconds
 - 🤖 **AI hints** from OpenAI GPT on Enter key press
 - ⚡ **Incremental processing** - accumulate text between requests
@@ -76,6 +77,11 @@ python main.py --help
 - `--enter-only` - Do not print live transcription, only accumulate for Enter
 - `--vad-frame-ms INT` - VAD sub-frame size in ms (default: 50)
 - `--vad-min-voiced-ratio FLOAT` - Minimum fraction of voiced sub-frames to consider the window speech (default: 0.2)
+ - `--no-loopback` - Disable system audio capture
+ - `--capture-mic` (default on) / `--no-mic` - Enable/disable microphone capture
+ - `--mic-index INT` / `--mic-device STR` - Select microphone by index or substring
+ - `--mic-samplerate INT` - Mic sample rate (defaults to `--samplerate`)
+ - `--mic-channels {1,2}` - Mic channels (default 1)
  - `--save-on-exit {ask,yes,no}` - Save session on exit (default: `ask`)
  - `--save-dir PATH` - Directory for saved sessions (default: `./sessions`)
  - `--save-audio-seconds INT` - Recent audio seconds to save (default: `30`)
@@ -100,6 +106,15 @@ python main.py --samplerate 22050
 
 # Auto-save session on exit to custom directory, keep 60s of audio
 python main.py --save-on-exit yes --save-dir sessions --save-audio-seconds 60
+
+# Capture only mic
+python main.py --no-loopback
+
+# Capture only system audio
+python main.py --no-mic
+
+# Select microphone by name substring
+python main.py --mic-device "USB Microphone"
 ```
 
 ## Build Windows .exe
