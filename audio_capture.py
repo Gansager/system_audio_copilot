@@ -33,7 +33,7 @@ class SystemAudioListener:
     Uses PyAudio to capture system audio.
     """
     
-    def __init__(self, samplerate: int = 16000, channels: int = 1, use_wasapi_loopback: bool = False, output_device: Optional[str] = None, input_device_index: Optional[int] = None):
+    def __init__(self, samplerate: int = 16000, channels: int = 1, use_wasapi_loopback: bool = False, output_device: Optional[str] = None, input_device_index: Optional[int] = None, max_session_seconds: int = 30):
         """
         Initialize system audio listener.
         
@@ -49,6 +49,7 @@ class SystemAudioListener:
         # Buffers for audio data
         self.live_buffer = []  # For live transcription
         self.since_enter_buffer = []  # For sending on Enter
+        self.session_ring_buffer = []  # Ring buffer for entire session (last N seconds), not cleared by workers
         
         # Thread-safety
         self.lock = threading.Lock()
@@ -68,6 +69,14 @@ class SystemAudioListener:
         self.output_device_name = output_device
         self.input_device_index = input_device_index
         self.recording_thread = None
+        
+        # Session ring buffer limits
+        try:
+            self.max_session_seconds = max(0, int(max_session_seconds))
+        except Exception:
+            self.max_session_seconds = 30
+        # Computed as number of blocks to keep
+        self._update_session_block_limit()
         
         # Initialize PyAudio (needed even if we try sounddevice, to keep backward compatibility)
         try:
@@ -467,6 +476,7 @@ class SystemAudioListener:
                     # Append to both buffers
                     self.live_buffer.append(audio_data.copy())
                     self.since_enter_buffer.append(audio_data.copy())
+                    self.session_ring_buffer.append(audio_data.copy())
                     
                     # Limit buffer sizes (keep last 30 seconds)
                     max_frames = int(30 * self.samplerate / self.frame_size)
@@ -474,6 +484,11 @@ class SystemAudioListener:
                         self.live_buffer = self.live_buffer[-max_frames:]
                     if len(self.since_enter_buffer) > max_frames:
                         self.since_enter_buffer = self.since_enter_buffer[-max_frames:]
+                    # Trim session ring buffer by configured block count
+                    if self.max_session_seconds > 0:
+                        max_blocks = self.max_session_blocks
+                        if max_blocks > 0 and len(self.session_ring_buffer) > max_blocks:
+                            self.session_ring_buffer = self.session_ring_buffer[-max_blocks:]
             
             return (None, self._pa_continue)
             
@@ -503,12 +518,17 @@ class SystemAudioListener:
                 with self.lock:
                     self.live_buffer.append(audio_data.copy())
                     self.since_enter_buffer.append(audio_data.copy())
+                    self.session_ring_buffer.append(audio_data.copy())
 
                     max_frames = int(30 * self.samplerate / self.frame_size)
                     if len(self.live_buffer) > max_frames:
                         self.live_buffer = self.live_buffer[-max_frames:]
                     if len(self.since_enter_buffer) > max_frames:
                         self.since_enter_buffer = self.since_enter_buffer[-max_frames:]
+                    if self.max_session_seconds > 0:
+                        max_blocks = self.max_session_blocks
+                        if max_blocks > 0 and len(self.session_ring_buffer) > max_blocks:
+                            self.session_ring_buffer = self.session_ring_buffer[-max_blocks:]
         except Exception as e:
             print(f"[error] Error in sd callback: {e}", file=sys.stderr)
 
@@ -557,6 +577,61 @@ class SystemAudioListener:
             self.since_enter_buffer.clear()
             
             return audio_chunk
+
+    def _update_session_block_limit(self) -> None:
+        """
+        Update the computed number of blocks to keep in the session ring buffer.
+        """
+        try:
+            if self.max_session_seconds <= 0:
+                self.max_session_blocks = 0
+            else:
+                self.max_session_blocks = int(max(1, round(self.max_session_seconds * self.samplerate / max(1, self.frame_size))))
+        except Exception:
+            self.max_session_blocks = int(max(1, round(30 * self.samplerate / max(1, self.frame_size))))
+
+    def set_max_session_seconds(self, seconds: int) -> None:
+        """
+        Update the maximum number of seconds to retain in the session ring buffer.
+        """
+        try:
+            self.max_session_seconds = max(0, int(seconds))
+        except Exception:
+            self.max_session_seconds = 30
+        self._update_session_block_limit()
+
+    def get_recent_audio(self, seconds: int) -> np.ndarray:
+        """
+        Get the most recent N seconds of audio from the session ring buffer.
+
+        Args:
+            seconds: Number of seconds to retrieve.
+
+        Returns:
+            numpy.ndarray: Audio data in float32 format, mono, sampled at self.samplerate.
+        """
+        try:
+            req_seconds = max(0, int(seconds))
+        except Exception:
+            req_seconds = 0
+
+        if req_seconds <= 0:
+            return np.array([], dtype=np.float32)
+
+        with self.lock:
+            if not self.session_ring_buffer:
+                return np.array([], dtype=np.float32)
+
+            blocks_needed = int(max(1, round(req_seconds * self.samplerate / max(1, self.frame_size))))
+            if blocks_needed >= len(self.session_ring_buffer):
+                sel = self.session_ring_buffer[:]
+            else:
+                sel = self.session_ring_buffer[-blocks_needed:]
+
+        try:
+            return np.concatenate(sel, axis=0) if len(sel) > 0 else np.array([], dtype=np.float32)
+        except Exception:
+            return np.array([], dtype=np.float32)
     
     def __enter__(self):
         """Context manager - enter."""

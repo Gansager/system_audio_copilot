@@ -49,6 +49,8 @@ run.bat
 2. **Live transcription**: Every 2 seconds it prints recognized text (gated by VAD to skip silence)
 3. **AI hints**: Press Enter to get a hint from AI
 4. **Exit**: Ctrl+C to quit cleanly
+   - On exit you'll be asked: `Сохранить сессию (аудио + текст)? [Y/n]`.
+   - Use flags to control: `--save-on-exit {ask,yes,no}`, `--save-dir`, `--save-audio-seconds`.
 
 ## 🔧 Useful commands
 
@@ -64,6 +66,9 @@ python main.py --enter-only
 
 # Help
 python main.py --help
+
+# Auto-save last 60s on exit into ./sessions
+python main.py --save-on-exit yes --save-audio-seconds 60
 ```
 
 ## ⚠️ Important notes

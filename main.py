@@ -10,6 +10,7 @@ import sys
 import threading
 import time
 from typing import Optional
+from datetime import datetime
 
 import numpy as np
 from dotenv import load_dotenv, find_dotenv
@@ -72,7 +73,8 @@ def live_transcription_worker(
     vad_frame_ms: int,
     vad_min_voiced_ratio: float,
     since_enter_text: list,
-    since_enter_lock: threading.Lock
+    since_enter_lock: threading.Lock,
+    session_text: list
 ):
     """
     Background worker for live transcription.
@@ -126,6 +128,8 @@ def live_transcription_worker(
                     # Add to buffer for Enter
                     with since_enter_lock:
                         since_enter_text.append(transcribed_text)
+                        # Also accumulate full session transcript
+                        session_text.append(transcribed_text)
                     
                     # Print live transcription if not in enter_only mode
                     if not enter_only:
@@ -140,7 +144,8 @@ def handle_enter_input(
     since_enter_text: list,
     since_enter_lock: threading.Lock,
     client: OpenAI,
-    config: dict
+    config: dict,
+    session_hints: list
 ):
     """
     Handle Enter key press to get an AI hint.
@@ -183,8 +188,152 @@ def handle_enter_input(
         print(f"\n=== ASSISTANT ===")
         print(hint)
         print("=" * 20)
+        try:
+            session_hints.append((full_text, hint))
+        except Exception:
+            pass
     else:
         print("[error] Failed to get assistant response")
+def prompt_and_save_session(
+    audio_listener: SystemAudioListener,
+    session_text: list,
+    session_hints: list,
+    save_on_exit_mode: str,
+    save_dir_opt: str,
+    save_audio_seconds: int,
+    session_start_ts: float
+) -> None:
+    """
+    Prompt user and save session (audio + text) depending on mode.
+
+    save_on_exit_mode: 'ask' | 'yes' | 'no'
+    save_dir_opt: base sessions directory (may be relative)
+    save_audio_seconds: how many recent seconds of audio to save
+    """
+    mode = (save_on_exit_mode or "ask").strip().lower()
+    if mode not in ("ask", "yes", "no"):
+        mode = "ask"
+
+    should_save = False
+    if mode == "yes":
+        should_save = True
+    elif mode == "no":
+        should_save = False
+    else:
+        # ask
+        try:
+            resp = input("Сохранить сессию (аудио + текст)? [Y/n] ").strip()
+            if resp == "" or resp.lower().startswith("y"):
+                should_save = True
+            else:
+                should_save = False
+        except EOFError:
+            # Non-interactive: default to no when ask
+            print("[warning] Input unavailable, skipping save (use --save-on-exit yes to auto-save)", file=sys.stderr)
+            should_save = False
+        except KeyboardInterrupt:
+            print("\n[info] Cancelled save prompt", file=sys.stderr)
+            should_save = False
+
+    if not should_save:
+        return
+
+    # Determine base dir for relative save_dir
+    base_dir = None
+    try:
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.getcwd()
+    except Exception:
+        base_dir = os.getcwd()
+
+    save_dir_cfg = save_dir_opt or "./sessions"
+    if os.path.isabs(save_dir_cfg):
+        sessions_root = save_dir_cfg
+    else:
+        sessions_root = os.path.join(base_dir, save_dir_cfg)
+
+    # Create timestamped session folder
+    now_ts = time.time()
+    start_dt = datetime.fromtimestamp(session_start_ts)
+    end_dt = datetime.fromtimestamp(now_ts)
+    session_folder_name = end_dt.strftime("%Y-%m-%d_%H%M%S")
+    session_dir = os.path.join(sessions_root, session_folder_name)
+
+    try:
+        os.makedirs(session_dir, exist_ok=True)
+    except Exception as e:
+        print(f"[warning] Failed to create session directory: {e}", file=sys.stderr)
+        return
+
+    # Save audio: last N seconds
+    audio_path = os.path.join(session_dir, "session.wav")
+    try:
+        recent_audio = audio_listener.get_recent_audio(int(save_audio_seconds))
+    except Exception:
+        recent_audio = np.array([], dtype=np.float32)
+
+    audio_saved = False
+    if recent_audio is not None and len(recent_audio) > 0:
+        try:
+            from stt import write_wav_file
+            write_wav_file(audio_path, recent_audio, int(audio_listener.samplerate))
+            audio_saved = True
+        except Exception as e:
+            print(f"[warning] Failed to save audio: {e}", file=sys.stderr)
+            audio_saved = False
+    else:
+        print("[warning] No recent audio to save for the selected interval", file=sys.stderr)
+
+    # Save transcript
+    transcript_path = os.path.join(session_dir, "transcript.txt")
+    try:
+        with open(transcript_path, 'w', encoding='utf-8') as f:
+            f.write("System Audio Copilot Session\n")
+            f.write("==============================\n\n")
+            f.write(f"Start: {start_dt.isoformat()}\n")
+            f.write(f"End:   {end_dt.isoformat()}\n")
+            f.write(f"Sample rate: {audio_listener.samplerate} Hz\n")
+            f.write(f"Saved audio seconds: {int(save_audio_seconds)}\n")
+            f.write("\n")
+
+            f.write("Transcript\n")
+            f.write("----------\n")
+            if session_text:
+                for line in session_text:
+                    try:
+                        f.write(line.strip() + "\n")
+                    except Exception:
+                        pass
+            else:
+                f.write("(no transcribed text)\n")
+            f.write("\n")
+
+            f.write("Assistant\n")
+            f.write("---------\n")
+            if session_hints:
+                for user_text, assistant_text in session_hints:
+                    try:
+                        f.write("USER: " + user_text.strip() + "\n")
+                        f.write("ASSISTANT: " + assistant_text.strip() + "\n")
+                        f.write("-" * 20 + "\n")
+                    except Exception:
+                        pass
+            else:
+                f.write("(no assistant interactions)\n")
+    except Exception as e:
+        print(f"[warning] Failed to save transcript: {e}", file=sys.stderr)
+
+    # Print resulting paths
+    try:
+        print(f"[info] Saved session to: {os.path.abspath(session_dir)}", file=sys.stderr)
+        if audio_saved:
+            print(f"[info]  - audio: {os.path.abspath(audio_path)}", file=sys.stderr)
+        print(f"[info]  - transcript: {os.path.abspath(transcript_path)}", file=sys.stderr)
+    except Exception:
+        pass
+
     
     sys.stdout.flush()
 
@@ -247,6 +396,25 @@ def main():
         default=0.2,
         help="Minimum fraction of voiced sub-frames to treat the window as speech (default: 0.2)"
     )
+    parser.add_argument(
+        "--save-on-exit",
+        type=str,
+        choices=["ask", "yes", "no"],
+        default=os.getenv("SAVE_ON_EXIT", "ask"),
+        help="Save session on exit: {ask,yes,no} (default: ask)"
+    )
+    parser.add_argument(
+        "--save-dir",
+        type=str,
+        default=os.getenv("SAVE_DIR", "./sessions"),
+        help="Directory to store saved sessions (default: ./sessions)"
+    )
+    parser.add_argument(
+        "--save-audio-seconds",
+        type=int,
+        default=int(os.getenv("SAVE_AUDIO_SECONDS", "30")),
+        help="Number of recent seconds of audio to save (default: 30)"
+    )
     
     args = parser.parse_args()
     
@@ -272,12 +440,17 @@ def main():
         samplerate=args.samplerate,
         use_wasapi_loopback=args.loopback,
         output_device=args.output_device,
-        input_device_index=args.input_index
+        input_device_index=args.input_index,
+        max_session_seconds=int(args.save_audio_seconds)
     )
     
     # Buffer for accumulating text since last Enter
     since_enter_text = []
     since_enter_lock = threading.Lock()
+    # Session-wide accumulators
+    session_text = []
+    session_hints = []
+    session_start_ts = time.time()
     
     try:
         # Start audio recording
@@ -296,7 +469,8 @@ def main():
                 args.vad_frame_ms,
                 args.vad_min_voiced_ratio,
                 since_enter_text,
-                since_enter_lock
+                since_enter_lock,
+                session_text
             ),
             daemon=True
         )
@@ -307,7 +481,7 @@ def main():
             try:
                 user_input = input()
                 if user_input.strip() == "" or user_input.strip() == "Enter":
-                    handle_enter_input(since_enter_text, since_enter_lock, client, config)
+                    handle_enter_input(since_enter_text, since_enter_lock, client, config, session_hints)
                 else:
                     print("[info] Press Enter to get an AI hint")
                     
@@ -321,6 +495,19 @@ def main():
     finally:
         # Stop recording cleanly
         audio_listener.stop_recording()
+        # Prompt and save session if requested
+        try:
+            prompt_and_save_session(
+                audio_listener=audio_listener,
+                session_text=session_text,
+                session_hints=session_hints,
+                save_on_exit_mode=str(args.save_on_exit),
+                save_dir_opt=str(args.save_dir),
+                save_audio_seconds=int(args.save_audio_seconds),
+                session_start_ts=session_start_ts,
+            )
+        except Exception as e:
+            print(f"[warning] Failed to save session: {e}", file=sys.stderr)
         print("[info] Application finished", file=sys.stderr)
 
 

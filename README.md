@@ -9,6 +9,7 @@ Python CLI tool for Windows 11 that listens to system audio (WASAPI loopback) an
 - 🤖 **AI hints** from OpenAI GPT on Enter key press
 - ⚡ **Incremental processing** - accumulate text between requests
 - 🔧 **Configurable parameters** via CLI arguments and environment variables
+ - 💾 **Save session on exit**: prompt/auto-save last N seconds audio + full transcript
 
 ## Requirements
 
@@ -75,6 +76,9 @@ python main.py --help
 - `--enter-only` - Do not print live transcription, only accumulate for Enter
 - `--vad-frame-ms INT` - VAD sub-frame size in ms (default: 50)
 - `--vad-min-voiced-ratio FLOAT` - Minimum fraction of voiced sub-frames to consider the window speech (default: 0.2)
+ - `--save-on-exit {ask,yes,no}` - Save session on exit (default: `ask`)
+ - `--save-dir PATH` - Directory for saved sessions (default: `./sessions`)
+ - `--save-audio-seconds INT` - Recent audio seconds to save (default: `30`)
 
 ### Examples
 
@@ -93,6 +97,9 @@ python main.py --enter-only
 
 # Custom sample rate
 python main.py --samplerate 22050
+
+# Auto-save session on exit to custom directory, keep 60s of audio
+python main.py --save-on-exit yes --save-dir sessions --save-audio-seconds 60
 ```
 
 ## Build Windows .exe
@@ -141,6 +148,21 @@ The app uses **WASAPI loopback** to capture system audio. This means it listens 
 2. **Request**: On Enter, all accumulated text is sent to GPT
 3. **Response**: AI returns a brief hint (1-2 sentences)
 4. **Reset**: The buffer is cleared and the process repeats
+
+### Save session on exit
+
+When the app exits (Ctrl+C/EOF), it can save the session:
+
+- Prompt: `Сохранить сессию (аудио + текст)? [Y/n]` (default on Enter is Yes)
+- Audio: last N seconds (default 30) from the session ring buffer
+- Text: full transcript for the session and assistant Q/A pairs
+- Output directory: `sessions/YYYY-MM-DD_HHMMSS/` with `session.wav` and `transcript.txt`
+
+You can control behavior via CLI or environment variables:
+
+- `--save-on-exit {ask,yes,no}` | `SAVE_ON_EXIT`
+- `--save-dir PATH` | `SAVE_DIR`
+- `--save-audio-seconds INT` | `SAVE_AUDIO_SECONDS`
 
 ## Troubleshooting
 
