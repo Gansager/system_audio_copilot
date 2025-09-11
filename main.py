@@ -16,6 +16,7 @@ import numpy as np
 from dotenv import load_dotenv, find_dotenv
 from openai import OpenAI
 import ctypes
+import signal
 
 from audio_capture import SystemAudioListener, MicrophoneListener
 from stt import transcribe_audio_chunk
@@ -793,6 +794,57 @@ def main():
     print(f"[info] Press Enter for an AI hint, Ctrl+C to exit", file=sys.stderr)
     print("=" * 60, file=sys.stderr)
     
+    # Shutdown coordination flags
+    shutdown_requested = threading.Event()
+    shutdown_completed = threading.Event()
+    shutdown_lock = threading.Lock()
+
+    def graceful_shutdown(reason: str, force_yes: bool = False):
+        if shutdown_completed.is_set():
+            return
+        # Ensure only one thread runs the shutdown body
+        with shutdown_lock:
+            if shutdown_completed.is_set():
+                return
+            try:
+                shutdown_requested.set()
+                # Stop recording cleanly
+                try:
+                    if audio_listener:
+                        audio_listener.stop_recording()
+                except Exception:
+                    pass
+                try:
+                    if mic_listener:
+                        mic_listener.stop_recording()
+                except Exception:
+                    pass
+                # Save session depending on mode; for non-interactive close auto-yes when asked
+                try:
+                    effective_mode = str(args.save_on_exit)
+                    if force_yes and effective_mode == "ask":
+                        effective_mode = "yes"
+                    prompt_and_save_session(
+                        system_listener=audio_listener,
+                        mic_listener=mic_listener,
+                        session_text=session_text,
+                        session_hints=session_hints,
+                        save_on_exit_mode=effective_mode,
+                        save_dir_opt=str(args.save_dir),
+                        save_audio_seconds=int(args.save_audio_seconds),
+                        save_audio_mode=str(args.save_audio_mode),
+                        mix_gain_mode=str(args.mix_gain_mode),
+                        mix_target_rms_db=float(args.mix_target_rms_db),
+                        mix_max_gain_db=float(args.mix_max_gain_db),
+                        mix_min_gain_db=float(args.mix_min_gain_db),
+                        mix_rms_gate_db=float(args.mix_rms_gate_db),
+                        session_start_ts=session_start_ts,
+                    )
+                except Exception as e:
+                    print(f"[warning] Failed to save session during shutdown: {e}", file=sys.stderr)
+            finally:
+                shutdown_completed.set()
+
     # Initialize audio listener
     enable_system = bool(args.loopback and not args.no_loopback)
     enable_mic = bool(args.capture_mic and not args.no_mic)
@@ -889,6 +941,61 @@ def main():
                     except Exception:
                         break
             threading.Thread(target=_periodic_status, daemon=True).start()
+
+        # Register signal handlers (best-effort cross-platform)
+        def _sig_handler(signum, frame):
+            if not shutdown_requested.is_set():
+                print("\n[info] Signal received, shutting down...", file=sys.stderr)
+                graceful_shutdown("signal", force_yes=True)
+        try:
+            signal.signal(signal.SIGTERM, _sig_handler)
+        except Exception:
+            pass
+        try:
+            # SIGHUP not on Windows typically
+            signal.signal(getattr(signal, 'SIGHUP', signal.SIGTERM), _sig_handler)
+        except Exception:
+            pass
+
+        # Windows console close handler via SetConsoleCtrlHandler
+        if os.name == 'nt':
+            try:
+                CTRL_C_EVENT = 0
+                CTRL_CLOSE_EVENT = 2
+                CTRL_LOGOFF_EVENT = 5
+                CTRL_SHUTDOWN_EVENT = 6
+
+                HandlerRoutine = ctypes.WINFUNCTYPE(ctypes.c_int, ctypes.c_uint)  # type: ignore
+
+                def _console_handler(ctrl_type):
+                    try:
+                        if ctrl_type in (CTRL_CLOSE_EVENT, CTRL_LOGOFF_EVENT, CTRL_SHUTDOWN_EVENT):
+                            if not shutdown_requested.is_set():
+                                try:
+                                    print("\n[info] Console close event, saving session...", file=sys.stderr)
+                                except Exception:
+                                    pass
+                                t = threading.Thread(target=graceful_shutdown, args=("console_close", True), daemon=False)
+                                t.start()
+                            # Wait briefly for shutdown to complete (Windows gives ~5s)
+                            deadline = time.time() + 4.5
+                            while not shutdown_completed.is_set() and time.time() < deadline:
+                                try:
+                                    time.sleep(0.05)
+                                except Exception:
+                                    break
+                            return 1  # handled
+                        # Let Ctrl+C be handled normally
+                        return 0
+                    except Exception:
+                        return 1
+
+                _handler = HandlerRoutine(_console_handler)
+                # Keep reference to avoid GC
+                config["_win_console_handler"] = _handler
+                ctypes.windll.kernel32.SetConsoleCtrlHandler(_handler, 1)  # type: ignore
+            except Exception:
+                pass
         
         # Main input loop
         while True:
@@ -907,37 +1014,11 @@ def main():
     except Exception as e:
         print(f"[error] Critical error: {e}", file=sys.stderr)
     finally:
-        # Stop recording cleanly
+        # Ensure graceful shutdown (idempotent)
         try:
-            if audio_listener:
-                audio_listener.stop_recording()
-        except Exception:
-            pass
-        try:
-            if mic_listener:
-                mic_listener.stop_recording()
-        except Exception:
-            pass
-        # Prompt and save session if requested
-        try:
-            prompt_and_save_session(
-                system_listener=audio_listener,
-                mic_listener=mic_listener,
-                session_text=session_text,
-                session_hints=session_hints,
-                save_on_exit_mode=str(args.save_on_exit),
-                save_dir_opt=str(args.save_dir),
-                save_audio_seconds=int(args.save_audio_seconds),
-                save_audio_mode=str(args.save_audio_mode),
-                mix_gain_mode=str(args.mix_gain_mode),
-                mix_target_rms_db=float(args.mix_target_rms_db),
-                mix_max_gain_db=float(args.mix_max_gain_db),
-                mix_min_gain_db=float(args.mix_min_gain_db),
-                mix_rms_gate_db=float(args.mix_rms_gate_db),
-                session_start_ts=session_start_ts,
-            )
+            graceful_shutdown("finally", force_yes=False)
         except Exception as e:
-            print(f"[warning] Failed to save session: {e}", file=sys.stderr)
+            print(f"[warning] Shutdown error: {e}", file=sys.stderr)
         print("[info] Application finished", file=sys.stderr)
 
 
