@@ -15,6 +15,7 @@ from datetime import datetime
 import numpy as np
 from dotenv import load_dotenv, find_dotenv
 from openai import OpenAI
+import ctypes
 
 from audio_capture import SystemAudioListener, MicrophoneListener
 from stt import transcribe_audio_chunk
@@ -134,7 +135,20 @@ def live_transcription_worker(
                     
                     # Print live transcription if not in enter_only mode
                     if not enter_only:
-                        prefix = "[Other]" if source_label == "system" else "[Me]"
+                        use_color = bool(config.get("use_color", False))
+                        colors = config.get("colors", {}) if isinstance(config.get("colors", {}), dict) else {}
+                        if source_label == "system":
+                            prefix = "[Other]"
+                            if use_color:
+                                c = colors.get("other", "")
+                                r = colors.get("reset", "")
+                                prefix = f"{c}[Other]{r}"
+                        else:
+                            prefix = "[Me]"
+                            if use_color:
+                                c = colors.get("me", "")
+                                r = colors.get("reset", "")
+                                prefix = f"{c}[Me]{r}"
                         print(f"{prefix} {transcribed_text}")
                         sys.stdout.flush()
                         
@@ -187,9 +201,18 @@ def handle_enter_input(
     )
     
     if hint:
-        print(f"\n=== ASSISTANT ===")
-        print(hint)
-        print("=" * 20)
+        use_color = bool(config.get("use_color", False))
+        colors = config.get("colors", {}) if isinstance(config.get("colors", {}), dict) else {}
+        if use_color:
+            c = colors.get("assistant", "")
+            r = colors.get("reset", "")
+            print(f"\n{c}=== ASSISTANT ==={r}")
+            print(f"{c}{hint}{r}")
+            print(f"{c}{'=' * 20}{r}")
+        else:
+            print(f"\n=== ASSISTANT ===")
+            print(hint)
+            print("=" * 20)
         try:
             session_hints.append((full_text, hint))
         except Exception:
@@ -657,6 +680,23 @@ def main():
         default=float(os.getenv("MIX_RMS_GATE_DB", "-60")),
         help="Do not boost sources with RMS below this (noise gate) (default: -60)"
     )
+    # UI flags
+    parser.add_argument(
+        "--ui-opacity",
+        type=int,
+        default=None,
+        help="Console window opacity percentage (Windows only, 0-100)"
+    )
+    parser.add_argument(
+        "--no-transparency",
+        action="store_true",
+        help="Disable console window transparency"
+    )
+    parser.add_argument(
+        "--no-color",
+        action="store_true",
+        help="Disable ANSI colors in output"
+    )
     
     args = parser.parse_args()
     
@@ -669,10 +709,70 @@ def main():
         args.save_on_exit = "yes"
         args.save_audio_seconds = 60
         args.save_audio_mode = "both"
+        if args.ui_opacity is None:
+            args.ui_opacity = 85
+        args.no_color = False
     
     # Load configuration
     config = load_config()
     client = setup_openai_client(config["api_key"])
+
+    # Prepare ANSI colors (Windows VT enable where possible)
+    def _enable_ansi_if_possible() -> bool:
+        try:
+            if os.name != 'nt':
+                return True
+            k32 = ctypes.windll.kernel32  # type: ignore
+            h = k32.GetStdHandle(-11)  # STD_OUTPUT_HANDLE = -11
+            mode = ctypes.c_uint32()
+            if k32.GetConsoleMode(h, ctypes.byref(mode)) == 0:
+                return False
+            new_mode = mode.value | 0x0004  # ENABLE_VIRTUAL_TERMINAL_PROCESSING
+            if k32.SetConsoleMode(h, new_mode) == 0:
+                return False
+            return True
+        except Exception:
+            return False
+
+    ansi_enabled = (not args.no_color) and _enable_ansi_if_possible()
+    config["use_color"] = bool(ansi_enabled)
+    if ansi_enabled:
+        config["colors"] = {
+            "me": "\x1b[95m",        # bright magenta (Me)
+            "other": "\x1b[93m",     # bright yellow (Other)
+            "assistant": "\x1b[92m", # bright green (Assistant)
+            "reset": "\x1b[0m",
+        }
+    else:
+        config["colors"] = {"me": "", "other": "", "assistant": "", "reset": ""}
+
+    # Apply transparency on Windows if requested/allowed
+    def _apply_opacity(percent: Optional[int]) -> None:
+        try:
+            if os.name != 'nt':
+                return
+            if args.no_transparency:
+                return
+            if percent is None:
+                return
+            val = max(0, min(100, int(percent)))
+            hwnd = ctypes.windll.kernel32.GetConsoleWindow()  # type: ignore
+            if hwnd == 0:
+                return
+            user32 = ctypes.windll.user32  # type: ignore
+            gwl_exstyle = -20
+            ws_ex_layered = 0x00080000
+            lwa_alpha = 0x2
+            # Get existing style
+            get_wl = ctypes.windll.user32.GetWindowLongW  # type: ignore
+            set_wl = ctypes.windll.user32.SetWindowLongW  # type: ignore
+            style = get_wl(hwnd, gwl_exstyle)
+            set_wl(hwnd, gwl_exstyle, style | ws_ex_layered)
+            alpha = int(round(255 * (val / 100.0)))
+            set_attr = ctypes.windll.user32.SetLayeredWindowAttributes  # type: ignore
+            set_attr(hwnd, 0, alpha, lwa_alpha)
+        except Exception:
+            pass
     
     print(f"[info] Starting System Audio Copilot", file=sys.stderr)
     print(f"[info] Transcription interval: {args.window_sec} s", file=sys.stderr)
@@ -684,6 +784,12 @@ def main():
             print(f"[info] Output device for loopback: {args.output_device}", file=sys.stderr)
     else:
         print(f"[info] Audio source: recording device (microphone/mixer)", file=sys.stderr)
+    # Apply requested opacity (Windows; silently ignore elsewhere)
+    try:
+        _apply_opacity(args.ui_opacity)
+    except Exception:
+        pass
+
     print(f"[info] Press Enter for an AI hint, Ctrl+C to exit", file=sys.stderr)
     print("=" * 60, file=sys.stderr)
     
