@@ -206,6 +206,10 @@ def prompt_and_save_session(
     save_audio_seconds: int,
     save_audio_mode: str,
     mix_gain_mode: str,
+    mix_target_rms_db: float,
+    mix_max_gain_db: float,
+    mix_min_gain_db: float,
+    mix_rms_gate_db: float,
     session_start_ts: float
 ) -> None:
     """
@@ -277,8 +281,8 @@ def prompt_and_save_session(
     if save_mode not in ("separate", "mix", "both"):
         save_mode = "mix"
     mix_gain_mode = (mix_gain_mode or "fixed").strip().lower()
-    if mix_gain_mode not in ("fixed", "normalize"):
-        mix_gain_mode = "fixed"
+    if mix_gain_mode not in ("fixed", "normalize", "balance"):
+        mix_gain_mode = "balance"
 
     system_audio = np.array([], dtype=np.float32)
     mic_audio = np.array([], dtype=np.float32)
@@ -363,18 +367,47 @@ def prompt_and_save_session(
                 a = _resample_linear(system_audio, int(system_sr), int(target_sr)) if have_sys else np.zeros((0,), dtype=np.float32)
                 b = _resample_linear(mic_audio, int(mic_sr), int(target_sr)) if have_mic else np.zeros((0,), dtype=np.float32)
                 a, b = _align_min_by_tail(a, b)
+                # Precompute levels
+                eps = 1e-9
+                peak_a = float(np.max(np.abs(a))) if len(a) > 0 else 0.0
+                peak_b = float(np.max(np.abs(b))) if len(b) > 0 else 0.0
+                rms_a = float(np.sqrt(np.mean(np.square(a)))) if len(a) > 0 else 0.0
+                rms_b = float(np.sqrt(np.mean(np.square(b)))) if len(b) > 0 else 0.0
                 if mix_gain_mode == "fixed":
                     g = 0.70710678  # -3 dB per source
                     mix = (a * g) + (b * g)
-                    applied_gain = "fixed(-3dB each)"
+                    applied_gain = f"fixed(-3dB each; peak_a={peak_a:.3f}, peak_b={peak_b:.3f}, rms_a={rms_a:.3f}, rms_b={rms_b:.3f})"
                 else:
-                    mix = a + b
-                    peak = float(np.max(np.abs(mix))) if len(mix) > 0 else 0.0
-                    if peak > 0:
-                        mix = (mix / peak * 0.999).astype(np.float32)
-                        applied_gain = "normalize(0dB to 0.999)"
+                    if mix_gain_mode == "normalize":
+                        mix = a + b
+                        peak = float(np.max(np.abs(mix))) if len(mix) > 0 else 0.0
+                        if peak > 0:
+                            mix = (mix / peak * 0.999).astype(np.float32)
+                            applied_gain = f"normalize(peak->{0.999}; peak_a={peak_a:.3f}, peak_b={peak_b:.3f}, rms_a={rms_a:.3f}, rms_b={rms_b:.3f})"
+                        else:
+                            applied_gain = "normalize(no-op)"
                     else:
-                        applied_gain = "normalize(no-op)"
+                        # balance mode: match each RMS to target within bounds, with gate
+                        target_lin = float(10.0 ** (float(mix_target_rms_db) / 20.0))
+                        max_gain_lin = float(10.0 ** (float(mix_max_gain_db) / 20.0))
+                        min_gain_lin = float(10.0 ** (float(mix_min_gain_db) / 20.0))
+                        gate_lin = float(10.0 ** (float(mix_rms_gate_db) / 20.0))
+                        g_a = target_lin / max(rms_a, eps)
+                        g_b = target_lin / max(rms_b, eps)
+                        # Do not boost below gate
+                        if rms_a < gate_lin and g_a > 1.0:
+                            g_a = 1.0
+                        if rms_b < gate_lin and g_b > 1.0:
+                            g_b = 1.0
+                        # Clamp to bounds
+                        g_a = float(min(max(g_a, min_gain_lin), max_gain_lin))
+                        g_b = float(min(max(g_b, min_gain_lin), max_gain_lin))
+                        mix = (a * g_a) + (b * g_b)
+                        # Prevent clipping by soft normalization if needed
+                        peak_mix = float(np.max(np.abs(mix))) if len(mix) > 0 else 0.0
+                        if peak_mix > 1.0:
+                            mix = (mix / peak_mix * 0.999).astype(np.float32)
+                        applied_gain = f"balance(ga={20*np.log10(g_a):.1f}dB, gb={20*np.log10(g_b):.1f}dB, peak_a={peak_a:.3f}, peak_b={peak_b:.3f}, rms_a={rms_a:.3f}, rms_b={rms_b:.3f})"
                 # Final clip to safety
                 if len(mix) > 0:
                     mix = np.clip(mix, -1.0, 1.0).astype(np.float32)
@@ -596,12 +629,46 @@ def main():
     parser.add_argument(
         "--mix-gain-mode",
         type=str,
-        choices=["fixed", "normalize"],
-        default=os.getenv("MIX_GAIN_MODE", "fixed"),
-        help="Mix gain strategy: fixed (-3 dB per source) or normalize to peak"
+        choices=["fixed", "normalize", "balance"],
+        default=os.getenv("MIX_GAIN_MODE", "balance"),
+        help="Mix gain strategy: fixed (-3 dB), normalize to peak, or balance by RMS"
+    )
+    parser.add_argument(
+        "--mix-target-rms-db",
+        type=float,
+        default=float(os.getenv("MIX_TARGET_RMS_DB", "-20")),
+        help="Target RMS in dBFS for balance mode (default: -20)"
+    )
+    parser.add_argument(
+        "--mix-max-gain-db",
+        type=float,
+        default=float(os.getenv("MIX_MAX_GAIN_DB", "12")),
+        help="Maximum gain in dB per source in balance mode (default: +12)"
+    )
+    parser.add_argument(
+        "--mix-min-gain-db",
+        type=float,
+        default=float(os.getenv("MIX_MIN_GAIN_DB", "-12")),
+        help="Minimum gain in dB per source in balance mode (default: -12)"
+    )
+    parser.add_argument(
+        "--mix-rms-gate-db",
+        type=float,
+        default=float(os.getenv("MIX_RMS_GATE_DB", "-60")),
+        help="Do not boost sources with RMS below this (noise gate) (default: -60)"
     )
     
     args = parser.parse_args()
+    
+    # Apply defaults when double-clicking the packaged .exe (no CLI args)
+    try:
+        is_frozen = bool(getattr(sys, 'frozen', False))
+    except Exception:
+        is_frozen = False
+    if len(sys.argv) <= 1 and is_frozen:
+        args.save_on_exit = "yes"
+        args.save_audio_seconds = 60
+        args.save_audio_mode = "both"
     
     # Load configuration
     config = load_config()
@@ -757,6 +824,10 @@ def main():
                 save_audio_seconds=int(args.save_audio_seconds),
                 save_audio_mode=str(args.save_audio_mode),
                 mix_gain_mode=str(args.mix_gain_mode),
+                mix_target_rms_db=float(args.mix_target_rms_db),
+                mix_max_gain_db=float(args.mix_max_gain_db),
+                mix_min_gain_db=float(args.mix_min_gain_db),
+                mix_rms_gate_db=float(args.mix_rms_gate_db),
                 session_start_ts=session_start_ts,
             )
         except Exception as e:
