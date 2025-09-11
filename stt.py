@@ -40,6 +40,21 @@ def pcm_float_to_wav_bytes(audio_f32: np.ndarray, sr: int) -> bytes:
     return wav_bytes
 
 
+def write_wav_file(path: str, audio_f32: np.ndarray, sr: int) -> None:
+    """
+    Write float32 PCM audio to a WAV file as PCM16.
+
+    This uses the same conversion as pcm_float_to_wav_bytes.
+    """
+    if audio_f32 is None or len(audio_f32) == 0:
+        # Create an empty WAV with 0 samples
+        audio_f32 = np.zeros((0,), dtype=np.float32)
+    # Clamp and convert
+    audio_f32 = np.clip(audio_f32, -1.0, 1.0)
+    audio_int16 = (audio_f32 * 32767).astype(np.int16)
+    sf.write(path, audio_int16, sr, format='WAV', subtype='PCM_16')
+
+
 def transcribe_wav_bytes(wav_bytes: bytes, client: OpenAI, model: str = "whisper-1") -> str:
     """
     Transcribe WAV bytes via the OpenAI Whisper API.

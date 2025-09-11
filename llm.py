@@ -7,7 +7,19 @@ from openai import OpenAI
 from typing import Optional
 
 
-def make_hint(text: str, client: OpenAI, model: str = "gpt-4o-mini", temperature: float = 0.2) -> str:
+DEFAULT_SYSTEM_PROMPT = (
+    "You are a helpful AI assistant. Give a brief, confident suggestion "
+    "(1-2 sentences), no fluff or apologies. Answer in English."
+)
+
+
+def make_hint(
+    text: str,
+    client: OpenAI,
+    model: str = "gpt-4o-mini",
+    temperature: float = 0.2,
+    system_prompt: Optional[str] = None,
+) -> str:
     """
     Get a brief hint from the AI assistant.
     
@@ -16,6 +28,7 @@ def make_hint(text: str, client: OpenAI, model: str = "gpt-4o-mini", temperature
         client: OpenAI client
         model: Model to use
         temperature: Generation temperature
+        system_prompt: Optional system message to steer assistant
     
     Returns:
         str: Assistant's response
@@ -24,18 +37,15 @@ def make_hint(text: str, client: OpenAI, model: str = "gpt-4o-mini", temperature
         return ""
     
     try:
-        # System prompt for brief hints
-        system_prompt = (
-            "You are a helpful AI assistant. Give a brief, confident suggestion "
-            "(1-2 sentences), no fluff or apologies. Answer in English."
-        )
+        # Use provided system prompt or default
+        prompt = system_prompt if system_prompt else DEFAULT_SYSTEM_PROMPT
         
         # Send request
         response = client.chat.completions.create(
             model=model,
             temperature=temperature,
             messages=[
-                {"role": "system", "content": system_prompt},
+                {"role": "system", "content": prompt},
                 {"role": "user", "content": text}
             ]
         )
