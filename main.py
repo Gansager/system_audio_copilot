@@ -20,7 +20,7 @@ import signal
 
 from audio_capture import SystemAudioListener, MicrophoneListener
 from stt import transcribe_audio_chunk
-from llm import make_hint
+from llm import make_hint, DEFAULT_SYSTEM_PROMPT
 
 
 def load_config():
@@ -52,7 +52,9 @@ def load_config():
         "model_transcribe": os.getenv("MODEL_TRANSCRIBE", "whisper-1"),
         "model_hints": os.getenv("MODEL_HINTS", "gpt-4o-mini"),
         "temperature": float(os.getenv("TEMPERATURE", "0.2")),
-        "dev_logs": str(os.getenv("DEV_LOGS", "0")).strip().lower() in ("1", "true", "yes", "on")
+        "dev_logs": str(os.getenv("DEV_LOGS", "0")).strip().lower() in ("1", "true", "yes", "on"),
+        "assistant_system_prompt": os.getenv("ASSISTANT_SYSTEM_PROMPT", DEFAULT_SYSTEM_PROMPT),
+        "ui_opacity": int(os.getenv("UI_OPACITY", "0") or "0"),
     }
 
 
@@ -198,7 +200,8 @@ def handle_enter_input(
         full_text,
         client,
         config["model_hints"],
-        config["temperature"]
+        config["temperature"],
+        system_prompt=config.get("assistant_system_prompt")
     )
     
     if hint:
@@ -711,7 +714,12 @@ def main():
         args.save_audio_seconds = 60
         args.save_audio_mode = "both"
         if args.ui_opacity is None:
-            args.ui_opacity = 85
+            # If UI_OPACITY provided in .env use it, else fallback to 85
+            try:
+                env_opacity = int(load_config().get("ui_opacity", 0))
+            except Exception:
+                env_opacity = 0
+            args.ui_opacity = env_opacity if env_opacity > 0 else 85
         args.no_color = False
     
     # Load configuration
@@ -734,6 +742,13 @@ def main():
             return True
         except Exception:
             return False
+
+    # If --ui-opacity not provided, use UI_OPACITY from config if >0
+    try:
+        if args.ui_opacity is None and int(config.get("ui_opacity", 0)) > 0:
+            args.ui_opacity = int(config.get("ui_opacity", 0))
+    except Exception:
+        pass
 
     ansi_enabled = (not args.no_color) and _enable_ansi_if_possible()
     config["use_color"] = bool(ansi_enabled)
