@@ -14,8 +14,8 @@ DEFAULT_SYSTEM_PROMPT = (
 
 DEFAULT_SUMMARY_SYSTEM_PROMPT = (
     "You are a facilitator. Summarize the meeting briefly and to the point, in the language of the meeting."
-    "First 1-2 sentences: what the meeting was about (no fluff). Then a list of 3-8 key points: decisions, questions, next steps."
-    "Don't add preambles like 'Here's a quick summary'. Use '-' markers for points."    
+    " First 1-2 sentences: what the meeting was about (no fluff). Then a list of 3-8 key points: decisions, questions, next steps."
+    " Don't add preambles like 'Here's a quick summary'. Use '-' markers for points."
 )
 
 
@@ -82,11 +82,7 @@ def make_summary(
         return ""
     try:
         prompt = system_prompt if system_prompt else DEFAULT_SUMMARY_SYSTEM_PROMPT
-        user_msg = (
-            "Ниже — фрагменты стенограммы встречи. Сформируй краткое резюме: "
-            "1–2 предложения общего описания, затем 3–8 пунктов с '-' в начале каждой строки.\n\n"
-            f"{transcript_text}"
-        )
+        user_msg = transcript_text
         response = client.chat.completions.create(
             model=model,
             temperature=temperature,

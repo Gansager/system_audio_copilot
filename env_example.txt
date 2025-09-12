@@ -12,5 +12,9 @@ VAD_THRESHOLD=0.0002
 # Optional: Assistant system prompt to steer responses
 ASSISTANT_SYSTEM_PROMPT=You are a concise assistant. Answer in Russian.
 
+# Optional: Dedicated prompt for meeting summaries (used for transcript summarization)
+# Keep concise, structured, and in the meeting's language
+ASSISTANT_SUMMARY_PROMPT=You are a facilitator. Summarize the meeting briefly and to the point, in the language of the meeting. First 1-2 sentences: what the meeting was about (no fluff). Then a list of 3-8 key points: decisions, questions, next steps. Don't add preambles like 'Here's a quick summary'. Use '-' markers for points.
+
 # Optional: Default UI opacity percentage (0-100). 0 means not set.
 UI_OPACITY=85
