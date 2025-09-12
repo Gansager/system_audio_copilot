@@ -20,7 +20,7 @@ import signal
 
 from audio_capture import SystemAudioListener, MicrophoneListener
 from stt import transcribe_audio_chunk
-from llm import make_hint, DEFAULT_SYSTEM_PROMPT
+from llm import make_hint, DEFAULT_SYSTEM_PROMPT, make_summary
 
 
 def load_config():
@@ -233,6 +233,8 @@ def prompt_and_save_session(
     save_audio_seconds: int,
     save_audio_mode: str,
     mix_gain_mode: str,
+    client: Optional[OpenAI],
+    config: Optional[dict],
     mix_target_rms_db: float,
     mix_max_gain_db: float,
     mix_min_gain_db: float,
@@ -456,8 +458,46 @@ def prompt_and_save_session(
         except Exception as e:
             print(f"[warning] Failed to create/save mixed audio: {e}", file=sys.stderr)
 
-    # Save transcript
+    # Prepare transcript and summary
     transcript_path = os.path.join(session_dir, "transcript.txt")
+    # Build source text (limit ~12k chars from tail)
+    try:
+        text_blocks = []
+        if session_text:
+            text_blocks.append("\n".join(session_text))
+        if session_hints:
+            # include last up to 10 pairs
+            tail = session_hints[-10:] if len(session_hints) > 10 else list(session_hints)
+            pairs = []
+            for u, a in tail:
+                try:
+                    pairs.append(f"USER: {u}\nASSISTANT: {a}")
+                except Exception:
+                    pass
+            if pairs:
+                text_blocks.append("\n\n".join(pairs))
+        source_text_full = "\n\n".join([t for t in text_blocks if t])
+        # limit tail ~12000 chars
+        max_chars = 12000
+        if len(source_text_full) > max_chars:
+            source_text = source_text_full[-max_chars:]
+        else:
+            source_text = source_text_full
+    except Exception:
+        source_text = ""
+
+    summary_text = ""
+    if client is not None and config is not None and source_text.strip():
+        try:
+            summary_text = make_summary(
+                transcript_text=source_text,
+                client=client,
+                model=config.get("model_hints", "gpt-4o-mini"),
+                temperature=float(config.get("temperature", 0.2)),
+                system_prompt=config.get("assistant_system_prompt"),
+            )
+        except Exception as e:
+            print(f"[warning] Summary generation error: {e}", file=sys.stderr)
     try:
         with open(transcript_path, 'w', encoding='utf-8') as f:
             f.write("System Audio Copilot Session\n")
@@ -476,6 +516,11 @@ def prompt_and_save_session(
             f.write(f"Mic sample rate: {mic_sr_str}\n")
             f.write(f"Saved audio seconds: {int(save_audio_seconds)}\n")
             f.write("\n")
+
+            if summary_text:
+                f.write("Summary\n")
+                f.write("-------\n")
+                f.write(summary_text.strip() + "\n\n")
 
             f.write("Transcript\n")
             f.write("----------\n")
@@ -849,6 +894,8 @@ def main():
                         save_audio_seconds=int(args.save_audio_seconds),
                         save_audio_mode=str(args.save_audio_mode),
                         mix_gain_mode=str(args.mix_gain_mode),
+                        client=client,
+                        config=config,
                         mix_target_rms_db=float(args.mix_target_rms_db),
                         mix_max_gain_db=float(args.mix_max_gain_db),
                         mix_min_gain_db=float(args.mix_min_gain_db),
