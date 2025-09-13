@@ -77,6 +77,20 @@ python main.py --help
 - `--enter-only` - Do not print live transcription, only accumulate for Enter
 - `--vad-frame-ms INT` - VAD sub-frame size in ms (default: 50)
 - `--vad-min-voiced-ratio FLOAT` - Minimum fraction of voiced sub-frames to consider the window speech (default: 0.2)
+ - `--min-rms-gate-db FLOAT` - RMS gate in dBFS; below this skip STT (default: -45)
+ - `--postfilter-min-chars INT` - Minimum content chars to keep a line (default: 3)
+ - `--postfilter-min-words INT` - Minimum words required to keep a line (default: 1)
+ - `--postfilter-dedup-seconds FLOAT` - Drop identical lines repeated within seconds (default: 5)
+ - `--postfilter-drop-punct-only {0,1}` - Drop punctuation/emoji-only lines (default: 1)
+ - `--use-webrtc-vad` - Use WebRTC VAD if available as additional gate
+ - `--cross-suppress` - Suppress quieter source when other source dominates (default: on)
+ - `--cross-suppress-rms-margin-db FLOAT` - Margin to suppress (default: 6)
+ - `--cross-suppress-stale-sec FLOAT` - Other source recency to consider (default: 2.0)
+ - `--snr-gate-db FLOAT` - Minimum estimated SNR in-window to pass (default: 0)
+ - `--postfilter-stopwords CSV` - Single-word stopwords to drop (default includes common fillers)
+ - `--postfilter-allowed-scripts CSV` - Allowed scripts (e.g., latin,cyrillic). Empty = all
+ - `--postfilter-similarity-threshold FLOAT` - Approx dedup similarity ratio (default: 0.85)
+ - `--postfilter-banned-phrases CSV` - Blocklist of phrases to drop (normalized substring)
  - `--no-loopback` - Disable system audio capture
  - `--capture-mic` (default on) / `--no-mic` - Enable/disable microphone capture
  - `--mic-index INT` / `--mic-device STR` - Select microphone by index or substring
@@ -114,6 +128,9 @@ python main.py --save-on-exit yes --save-audio-seconds 0 --buffer-session-second
 
 # Save mixed audio too
 python main.py --save-on-exit yes --save-audio-mode both
+
+# Reduce hallucinations on silence
+python main.py --min-rms-gate-db -40 --postfilter-dedup-seconds 10 --postfilter-drop-punct-only 1
 
 # Capture only mic
 python main.py --no-loopback
@@ -186,6 +203,20 @@ You can control behavior via CLI or environment variables:
 - `--save-on-exit {ask,yes,no}` | `SAVE_ON_EXIT`
 - `--save-dir PATH` | `SAVE_DIR`
 - `--save-audio-seconds INT` | `SAVE_AUDIO_SECONDS`
+ - `--min-rms-gate-db FLOAT` | `MIN_RMS_GATE_DB`
+ - `--postfilter-min-chars INT` | `POSTFILTER_MIN_CHARS`
+ - `--postfilter-min-words INT` | `POSTFILTER_MIN_WORDS`
+ - `--postfilter-dedup-seconds FLOAT` | `POSTFILTER_DEDUP_SECONDS`
+ - `--postfilter-drop-punct-only {0,1}` | `POSTFILTER_DROP_PUNCT_ONLY`
+ - `--use-webrtc-vad` (no env) additional gate if library present
+ - `--cross-suppress` | `CROSS_SUPPRESS`
+ - `--cross-suppress-rms-margin-db` | `CROSS_SUPPRESS_RMS_MARGIN_DB`
+ - `--cross-suppress-stale-sec` | `CROSS_SUPPRESS_STALE_SEC`
+ - `--snr-gate-db` | `SNR_GATE_DB`
+ - `--postfilter-stopwords` | `POSTFILTER_STOPWORDS`
+ - `--postfilter-allowed-scripts` | `POSTFILTER_ALLOWED_SCRIPTS`
+ - `--postfilter-similarity-threshold` | `POSTFILTER_SIMILARITY_THRESHOLD`
+ - `--postfilter-banned-phrases` | `POSTFILTER_BANNED_PHRASES`
 - `--buffer-session-seconds INT` | `BUFFER_SESSION_SECONDS`
 
 ## Troubleshooting
