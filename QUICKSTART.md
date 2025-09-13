@@ -70,6 +70,9 @@ python main.py --help
 # Auto-save last 60s on exit into ./sessions
 python main.py --save-on-exit yes --save-audio-seconds 60
 
+# Save the entire session on exit
+python main.py --save-on-exit yes --save-audio-seconds 0 --buffer-session-seconds 0
+
 # Capture only microphone
 python main.py --no-loopback
 

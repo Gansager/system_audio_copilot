@@ -716,6 +716,12 @@ def main():
         help="Number of recent seconds of audio to save (default: 30)"
     )
     parser.add_argument(
+        "--buffer-session-seconds",
+        type=int,
+        default=(int(os.getenv("BUFFER_SESSION_SECONDS")) if os.getenv("BUFFER_SESSION_SECONDS") is not None else None),
+        help="Max seconds to keep in RAM for the session ring buffer; 0 = unlimited. If not set, defaults to the value of --save-audio-seconds."
+    )
+    parser.add_argument(
         "--save-audio-mode",
         type=str,
         choices=["separate", "mix", "both"],
@@ -780,8 +786,12 @@ def main():
         is_frozen = False
     if len(sys.argv) <= 1 and is_frozen:
         args.save_on_exit = "yes"
-        args.save_audio_seconds = 60
+        args.save_audio_seconds = 0
         args.save_audio_mode = "both"
+        try:
+            args.buffer_session_seconds = 0
+        except Exception:
+            pass
         if args.ui_opacity is None:
             # If UI_OPACITY provided in .env use it, else fallback to 85
             try:
@@ -936,13 +946,19 @@ def main():
     enable_mic = bool(args.capture_mic and not args.no_mic)
     audio_listener = None
     mic_listener = None
+    # Determine effective session buffer depth in seconds for in-memory storage
+    try:
+        buffer_seconds_effective = args.buffer_session_seconds if args.buffer_session_seconds is not None else args.save_audio_seconds
+    except Exception:
+        buffer_seconds_effective = args.save_audio_seconds
+
     if enable_system:
         audio_listener = SystemAudioListener(
             samplerate=args.samplerate,
             use_wasapi_loopback=True,
             output_device=args.output_device,
             input_device_index=args.input_index,
-            max_session_seconds=int(args.save_audio_seconds)
+            max_session_seconds=int(buffer_seconds_effective)
         )
     if enable_mic:
         mic_listener = MicrophoneListener(
@@ -950,7 +966,7 @@ def main():
             channels=int(args.mic_channels),
             input_device_name=args.mic_device,
             input_device_index=args.mic_index,
-            max_session_seconds=int(args.save_audio_seconds)
+            max_session_seconds=int(buffer_seconds_effective)
         )
     
     # Buffer for accumulating text since last Enter

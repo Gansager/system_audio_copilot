@@ -84,7 +84,8 @@ python main.py --help
  - `--mic-channels {1,2}` - Mic channels (default 1)
  - `--save-on-exit {ask,yes,no}` - Save session on exit (default: `ask`)
  - `--save-dir PATH` - Directory for saved sessions (default: `./sessions`)
- - `--save-audio-seconds INT` - Recent audio seconds to save (default: `30`)
+ - `--save-audio-seconds INT` - Recent audio seconds to save (default: `30`; set to `0` to save the full session)
+ - `--buffer-session-seconds INT` - Max seconds to retain in RAM for the session ring buffer; `0` = unlimited. If not set, defaults to `--save-audio-seconds`.
  - `--save-audio-mode {separate,mix,both}` - Save separate files, mixed, or both (default: `separate`)
 
 ### Examples
@@ -107,6 +108,9 @@ python main.py --samplerate 22050
 
 # Auto-save session on exit to custom directory, keep 60s of audio
 python main.py --save-on-exit yes --save-dir sessions --save-audio-seconds 60
+
+# Save the entire session (audio + transcript) on exit
+python main.py --save-on-exit yes --save-audio-seconds 0 --buffer-session-seconds 0
 
 # Save mixed audio too
 python main.py --save-on-exit yes --save-audio-mode both
@@ -173,7 +177,7 @@ The app uses **WASAPI loopback** to capture system audio. This means it listens 
 When the app exits (Ctrl+C/EOF), it can save the session:
 
 - Prompt: `Сохранить сессию (аудио + текст)? [Y/n]` (default on Enter is Yes)
-- Audio: last N seconds (default 30) from the session ring buffer
+- Audio: last N seconds (default 30) from the session ring buffer. If `--save-audio-seconds` is `0` or negative, the entire session audio is saved.
 - Text: full transcript for the session and assistant Q/A pairs
 - Output directory: `sessions/YYYY-MM-DD_HHMMSS/` with `session.wav` and `transcript.txt`
 
@@ -182,6 +186,7 @@ You can control behavior via CLI or environment variables:
 - `--save-on-exit {ask,yes,no}` | `SAVE_ON_EXIT`
 - `--save-dir PATH` | `SAVE_DIR`
 - `--save-audio-seconds INT` | `SAVE_AUDIO_SECONDS`
+- `--buffer-session-seconds INT` | `BUFFER_SESSION_SECONDS`
 
 ## Troubleshooting
 

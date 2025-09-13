@@ -18,3 +18,6 @@ ASSISTANT_SUMMARY_PROMPT=You are a facilitator. Summarize the meeting briefly an
 
 # Optional: Default UI opacity percentage (0-100). 0 means not set.
 UI_OPACITY=85
+
+# Optional: limit in-RAM session buffer length (seconds). 0 = unlimited (default)
+BUFFER_SESSION_SECONDS=0
