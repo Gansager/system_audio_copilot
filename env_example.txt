@@ -1,3 +1,222 @@
+# System Audio Copilot - Example .env
+# Copy this file to .env and adjust values as needed.
+# Precedence: CLI flags > .env values > built-in defaults in code.
+
+############################
+# API & Models
+############################
+# OPENAI_API_KEY (string)
+# Your OpenAI API key. Required for transcription and hints.
+# Default: none (required)
+# Impact: Without a valid key the app exits.
+# CLI: not applicable (use .env)
+OPENAI_API_KEY=sk-REPLACE_WITH_YOUR_KEY
+
+# MODEL_TRANSCRIBE (string)
+# Whisper model for STT.
+# Default: whisper-1
+# Typical: whisper-1
+# CLI: --model-transcribe (not exposed; set via .env)
+MODEL_TRANSCRIBE=whisper-1
+
+# MODEL_HINTS (string)
+# Model for AI hints and summary.
+# Default: gpt-4o-mini
+# Typical: gpt-4o-mini
+# CLI: --model-hints (not exposed; set via .env)
+MODEL_HINTS=gpt-4o-mini
+
+# TEMPERATURE (float, 0..2)
+# Sampling temperature for hints/summary.
+# Default: 0.2
+# Higher => more creative.
+# CLI: --temperature (not exposed; set via .env)
+TEMPERATURE=0.2
+
+# DEV_LOGS (boolean as 0/1/true/false)
+# Extra debug logs to stderr.
+# Default: 0 (off)
+# CLI: not applicable
+DEV_LOGS=0
+
+# ASSISTANT_SYSTEM_PROMPT (string)
+# System prompt for the assistant (hints). Leave empty to use built-in.
+# Default: internal prompt
+# CLI: not applicable
+ASSISTANT_SYSTEM_PROMPT=
+
+# ASSISTANT_SUMMARY_PROMPT (string)
+# System prompt for summaries. Leave empty to use built-in.
+# Default: internal prompt
+# CLI: not applicable
+ASSISTANT_SUMMARY_PROMPT=
+
+############################
+# UI (Windows only)
+############################
+# UI_OPACITY (int %, 0..100)
+# Console window opacity. 0 disables.
+# Default: 0 (disabled)
+# CLI: --ui-opacity (overrides); --no-transparency to disable
+UI_OPACITY=0
+
+############################
+# Session Buffering & Saving
+############################
+# SAVE_ON_EXIT (ask|yes|no)
+# Whether to save session on app exit.
+# Default: ask
+# CLI: --save-on-exit
+SAVE_ON_EXIT=ask
+
+# SAVE_DIR (path)
+# Base directory for saved sessions (relative to app folder if relative).
+# Default: ./sessions
+# CLI: --save-dir
+SAVE_DIR=./sessions
+
+# SAVE_AUDIO_SECONDS (int seconds)
+# How many recent seconds to save on exit; 0 = full session.
+# Default: 30
+# CLI: --save-audio-seconds
+SAVE_AUDIO_SECONDS=30
+
+# SAVE_AUDIO_MODE (separate|mix|both)
+# What to save: sources separately, mixed, or both.
+# Default: mix (per code)
+# CLI: --save-audio-mode
+SAVE_AUDIO_MODE=mix
+
+# BUFFER_SESSION_SECONDS (int seconds)
+# Max in-RAM ring buffer length for the session; 0 = unlimited.
+# If unset, it inherits SAVE_AUDIO_SECONDS.
+# Default (effective): inherit from SAVE_AUDIO_SECONDS (30)
+# Memory note: ~230 MB/hour/source @16 kHz mono float32. 0 can grow large.
+# CLI: --buffer-session-seconds
+BUFFER_SESSION_SECONDS=30
+
+############################
+# Mixing (when --save-audio-mode mix/both)
+############################
+# MIX_GAIN_MODE (fixed|normalize|balance)
+# Strategy for mixing mic+system.
+# Default: balance
+# CLI: --mix-gain-mode
+MIX_GAIN_MODE=balance
+
+# MIX_TARGET_RMS_DB (float dBFS)
+# Target RMS for each source in balance mode.
+# Default: -20
+# CLI: --mix-target-rms-db
+MIX_TARGET_RMS_DB=-20
+
+# MIX_MAX_GAIN_DB (float dB)
+# Max per-source boost in balance mode.
+# Default: 12
+# CLI: --mix-max-gain-db
+MIX_MAX_GAIN_DB=12
+
+# MIX_MIN_GAIN_DB (float dB)
+# Min per-source gain (negative means attenuation) in balance mode.
+# Default: -12
+# CLI: --mix-min-gain-db
+MIX_MIN_GAIN_DB=-12
+
+# MIX_RMS_GATE_DB (float dBFS)
+# Do not boost sources with RMS below this (noise gate) in balance mode.
+# Default: -60
+# CLI: --mix-rms-gate-db
+MIX_RMS_GATE_DB=-60
+
+############################
+# VAD & Pre/Post-filters
+############################
+# VAD_THRESHOLD (float RMS)
+# Sub-frame RMS threshold for voiced frames.
+# Default: 0.0002
+# CLI: --vad-threshold
+VAD_THRESHOLD=0.0002
+
+# MIN_RMS_GATE_DB (float dBFS)
+# Overall window RMS gate; below this STT is skipped.
+# Default: -45
+# CLI: --min-rms-gate-db
+MIN_RMS_GATE_DB=-45
+
+# SNR_GATE_DB (float dB)
+# Min estimated speech-vs-noise SNR inside window; below this STT is skipped.
+# Default: 0
+# CLI: --snr-gate-db
+SNR_GATE_DB=0
+
+# POSTFILTER_MIN_CHARS (int)
+# Minimum content characters (after stripping punctuation) to keep a line.
+# Default: 3
+# CLI: --postfilter-min-chars
+POSTFILTER_MIN_CHARS=3
+
+# POSTFILTER_MIN_WORDS (int)
+# Minimum words required to keep a line.
+# Default: 1
+# CLI: --postfilter-min-words
+POSTFILTER_MIN_WORDS=1
+
+# POSTFILTER_DEDUP_SECONDS (float seconds)
+# Drop identical/very similar lines repeated within this window.
+# Default: 5
+# CLI: --postfilter-dedup-seconds
+POSTFILTER_DEDUP_SECONDS=5
+
+# POSTFILTER_DROP_PUNCT_ONLY (0|1)
+# Drop lines that contain only punctuation/emojis when 1.
+# Default: 1 (on)
+# CLI: --postfilter-drop-punct-only {0,1}
+POSTFILTER_DROP_PUNCT_ONLY=1
+
+# POSTFILTER_STOPWORDS (CSV)
+# Single-word outputs matching these (case-insensitive) are dropped.
+# Default: you,thanks,thank,ok,okay,hello,hi
+# CLI: --postfilter-stopwords
+POSTFILTER_STOPWORDS=you,thanks,thank,ok,okay,hello,hi
+
+# POSTFILTER_ALLOWED_SCRIPTS (CSV)
+# Allowed scripts in outputs (latin,cyrillic). Empty = allow all.
+# Default: latin,cyrillic
+# CLI: --postfilter-allowed-scripts
+POSTFILTER_ALLOWED_SCRIPTS=latin,cyrillic
+
+# POSTFILTER_SIMILARITY_THRESHOLD (0..1)
+# Similarity ratio for approx dedup within the dedup window.
+# Default: 0.85
+# CLI: --postfilter-similarity-threshold
+POSTFILTER_SIMILARITY_THRESHOLD=0.85
+
+# POSTFILTER_BANNED_PHRASES (CSV)
+# Blocklist of phrases (normalized, substring match). Useful against common hallucinations.
+# Default: thank you for watching,thank you so much for watching
+# CLI: --postfilter-banned-phrases
+POSTFILTER_BANNED_PHRASES=thank you for watching,thank you so much for watching
+
+############################
+# Cross-source suppression
+############################
+# CROSS_SUPPRESS (0|1)
+# When 1, suppress the quieter source if the other is louder by a margin.
+# Default: 1 (on)
+# CLI: --cross-suppress / (set 0 here to disable)
+CROSS_SUPPRESS=1
+
+# CROSS_SUPPRESS_RMS_MARGIN_DB (float dB)
+# Margin by which the other source must exceed to suppress this one.
+# Default: 6
+# CLI: --cross-suppress-rms-margin-db
+CROSS_SUPPRESS_RMS_MARGIN_DB=6
+
+# CROSS_SUPPRESS_STALE_SEC (float seconds)
+# How recent the other source must be active to apply suppression.
+# Default: 2.0
+# CLI: --cross-suppress-stale-sec
+CROSS_SUPPRESS_STALE_SEC=2.0
 # Copy this file to .env and fill with your values
 
 # OpenAI API Configuration
