@@ -10,6 +10,9 @@ import sys
 import threading
 import time
 from typing import Optional
+import re
+import difflib
+import unicodedata
 from datetime import datetime
 
 import numpy as np
@@ -77,6 +80,20 @@ def live_transcription_worker(
     vad_threshold: float,
     vad_frame_ms: int,
     vad_min_voiced_ratio: float,
+    min_rms_gate_db: float,
+    postfilter_min_chars: int,
+    postfilter_min_words: int,
+    postfilter_dedup_seconds: float,
+    postfilter_drop_punct_only: bool,
+    use_webrtc_vad: bool,
+    cross_suppress_enabled: bool,
+    cross_suppress_rms_margin_db: float,
+    cross_suppress_stale_sec: float,
+    snr_gate_db: float,
+    postfilter_stopwords_csv: str,
+    postfilter_allowed_scripts_csv: str,
+    postfilter_similarity_threshold: float,
+    postfilter_banned_phrases_csv: str,
     since_enter_text: list,
     since_enter_lock: threading.Lock,
     session_text: list,
@@ -94,6 +111,128 @@ def live_transcription_worker(
         since_enter_text: List to accumulate text
         since_enter_lock: Lock for since_enter_text
     """
+    # Dedup state per worker/source
+    last_text = ""
+    last_time = 0.0
+
+    # Optional WebRTC VAD setup
+    webrtc_vad = None
+    if use_webrtc_vad:
+        try:
+            import webrtcvad  # type: ignore
+            webrtc_vad = webrtcvad.Vad(2)
+        except Exception:
+            webrtc_vad = None
+
+    def _has_speech_webrtc(chunk: np.ndarray, sr: int) -> bool:
+        if webrtc_vad is None:
+            return True
+        try:
+            # webrtcvad expects 16-bit PCM at 8/16/32/48 kHz and 10/20/30 ms frames
+            if sr not in (8000, 16000, 32000, 48000):
+                return True
+            # 30 ms frames for robustness
+            frame_ms = 30
+            frame_len = int(sr * frame_ms / 1000)
+            if frame_len <= 0 or len(chunk) < frame_len:
+                return False
+            # Convert float32 [-1,1] to int16
+            pcm16 = np.clip(chunk, -1.0, 1.0)
+            pcm16 = (pcm16 * 32767.0).astype(np.int16).tobytes()
+            step = frame_len * 2  # int16 bytes per sample
+            any_speech = False
+            for off in range(0, len(pcm16) - step + 1, step):
+                frame = pcm16[off:off+step]
+                if webrtc_vad.is_speech(frame, sr):
+                    any_speech = True
+                    break
+            return any_speech
+        except Exception:
+            return True
+
+    def _text_is_punct_only(s: str) -> bool:
+        try:
+            # Keep letters (Latin, Cyrillic), digits, and CJK as "content"; drop others
+            core = re.sub(r"[^0-9A-Za-zА-Яа-яЁё\u4e00-\u9fff]+", "", s)
+            return len(core.strip()) == 0
+        except Exception:
+            return False
+
+    def _repeatiness_bigram_high(s: str) -> bool:
+        try:
+            tokens = [t for t in re.split(r"\s+", s.strip()) if t]
+            if len(tokens) < 4:
+                return False
+            bigrams = [tokens[i] + "_" + tokens[i+1] for i in range(len(tokens)-1)]
+            if not bigrams:
+                return False
+            counts = {}
+            for bg in bigrams:
+                counts[bg] = counts.get(bg, 0) + 1
+            dup_sum = sum(c-1 for c in counts.values() if c > 1)
+            ratio = float(dup_sum) / float(len(bigrams))
+            return ratio > 0.6
+        except Exception:
+            return False
+
+    def _snr_gate_ok(rms_per_frame: np.ndarray) -> bool:
+        try:
+            if rms_per_frame is None or len(rms_per_frame) == 0:
+                return True
+            # Split by VAD threshold to approximate speech vs noise
+            speech_vals = rms_per_frame[rms_per_frame >= vad_threshold]
+            noise_vals = rms_per_frame[rms_per_frame < vad_threshold]
+            if len(speech_vals) == 0 or len(noise_vals) == 0:
+                return True
+            speech_rms = float(np.mean(speech_vals))
+            noise_rms = float(np.mean(noise_vals))
+            eps = 1e-9
+            snr_db_est = 20.0 * np.log10(max(speech_rms, eps) / max(noise_rms, eps))
+            return snr_db_est >= float(snr_gate_db)
+        except Exception:
+            return True
+
+    def _scripts_allowed(txt: str) -> bool:
+        try:
+            allowed_csv = (postfilter_allowed_scripts_csv or "").strip()
+            if not allowed_csv:
+                return True
+            allowed = set([s.strip().lower() for s in allowed_csv.split(',') if s.strip()])
+            has_letter = False
+            for ch in txt:
+                if ch.isalpha():
+                    has_letter = True
+                    code = ord(ch)
+                    is_latin = (('a' <= ch.lower() <= 'z'))
+                    is_cyr = (0x0400 <= code <= 0x04FF) or (ch in ("Ё", "ё"))
+                    accept = (("latin" in allowed and is_latin) or ("cyrillic" in allowed and is_cyr))
+                    if not accept:
+                        return False
+            return True if has_letter else True
+        except Exception:
+            return True
+
+    # Parse stopwords
+    try:
+        stopwords = set([w.strip().lower() for w in (postfilter_stopwords_csv or "").split(',') if w.strip()])
+    except Exception:
+        stopwords = set()
+
+    # Parse banned phrases (normalized lowercase)
+    try:
+        banned_phrases = [p.strip().lower() for p in (postfilter_banned_phrases_csv or "").split(',') if p.strip()]
+    except Exception:
+        banned_phrases = []
+
+    def _normalize_for_compare(s: str) -> str:
+        try:
+            s = s.lower()
+            s = re.sub(r"[^0-9A-Za-zА-Яа-яЁё\u4e00-\u9fff\s]+", " ", s)
+            s = re.sub(r"\s+", " ", s).strip()
+            return s
+        except Exception:
+            return s.strip().lower()
+
     while True:
         try:
             time.sleep(window_sec)
@@ -116,11 +255,42 @@ def live_transcription_worker(
                     rms_per_frame = np.sqrt(np.mean(np.square(frames), axis=1))
                     voiced_flags = rms_per_frame >= vad_threshold
                     voiced_ratio = float(np.mean(voiced_flags)) if num_frames > 0 else 0.0
+                    # Overall RMS in dBFS
+                    chunk_rms = float(np.sqrt(np.mean(np.square(audio_chunk)))) if len(audio_chunk) > 0 else 0.0
+                    eps = 1e-9
+                    chunk_rms_db = 20.0 * np.log10(max(chunk_rms, eps))
                 except Exception:
                     voiced_ratio = 0.0
+                    chunk_rms_db = -120.0
 
-                if voiced_ratio < vad_min_voiced_ratio:
-                    # Skip silent/low-voicing windows entirely
+                # Combined gate: voiced ratio AND RMS gate
+                if voiced_ratio < vad_min_voiced_ratio or chunk_rms_db < float(min_rms_gate_db):
+                    continue
+
+                # SNR gate (speech frames vs noise frames)
+                if not _snr_gate_ok(rms_per_frame):
+                    continue
+
+                # Cross-source suppression using recent RMS map in shared config
+                try:
+                    if "_recent_rms" not in config:
+                        config["_recent_rms"] = {}
+                    now_t = time.time()
+                    config["_recent_rms"][source_label] = (float(chunk_rms_db), now_t)
+                    if cross_suppress_enabled:
+                        other_label = "mic" if source_label == "system" else "system"
+                        other_entry = config["_recent_rms"].get(other_label)
+                        if other_entry is not None:
+                            other_rms_db, other_ts = other_entry
+                            if (now_t - float(other_ts)) <= float(cross_suppress_stale_sec):
+                                if float(other_rms_db) - float(chunk_rms_db) >= float(cross_suppress_rms_margin_db):
+                                    # Other source clearly dominates; skip STT for this quieter source
+                                    continue
+                except Exception:
+                    pass
+
+                # Optional WebRTC VAD gate
+                if use_webrtc_vad and not _has_speech_webrtc(audio_chunk, sr):
                     continue
                 # Transcribe
                 transcribed_text = transcribe_audio_chunk(
@@ -131,15 +301,69 @@ def live_transcription_worker(
                 )
                 
                 if transcribed_text:
+                    # Post-filters
+                    txt = str(transcribed_text).strip()
+                    if postfilter_drop_punct_only and _text_is_punct_only(txt):
+                        continue
+                    # Length after stripping punctuation/emojis
+                    try:
+                        core = re.sub(r"[^0-9A-Za-zА-Яа-яЁё\u4e00-\u9fff]+", "", txt)
+                    except Exception:
+                        core = txt
+                    if len(core.strip()) < int(postfilter_min_chars):
+                        continue
+                    # Minimum words requirement
+                    try:
+                        words = [w for w in re.split(r"\s+", re.sub(r"[^0-9A-Za-zА-Яа-яЁё\u4e00-\u9fff\s]+", " ", txt)) if w]
+                        if len(words) < int(postfilter_min_words):
+                            continue
+                        if len(words) == 1 and stopwords and words[0].lower() in stopwords:
+                            continue
+                    except Exception:
+                        pass
+                    # Allowed scripts filter
+                    if not _scripts_allowed(txt):
+                        continue
+                    # Banned phrase filter (substring on normalized)
+                    try:
+                        norm_txt = _normalize_for_compare(txt)
+                        if banned_phrases:
+                            for bp in banned_phrases:
+                                if bp and bp in norm_txt:
+                                    raise StopIteration
+                    except StopIteration:
+                        continue
+                    except Exception:
+                        pass
+
+                    # Dedup same or very similar text in short window
+                    now_t = time.time()
+                    if last_text and (now_t - last_time) < float(postfilter_dedup_seconds):
+                        try:
+                            last_norm = _normalize_for_compare(last_text)
+                            curr_norm = norm_txt if 'norm_txt' in locals() else _normalize_for_compare(txt)
+                            ratio = difflib.SequenceMatcher(None, last_norm, curr_norm).ratio()
+                            if ratio >= float(postfilter_similarity_threshold) or (last_norm in curr_norm) or (curr_norm in last_norm):
+                                continue
+                            # Also keep exact-core check as fast path
+                            if core.strip().lower() == re.sub(r"[^0-9A-Za-zА-Яа-яЁё\u4e00-\u9fff]+", "", last_text).strip().lower():
+                                continue
+                        except Exception:
+                            pass
+                    # Repeatiness heuristic
+                    if _repeatiness_bigram_high(txt):
+                        continue
+                    last_text = txt
+                    last_time = now_t
                     # Add to buffer for Enter
                     with since_enter_lock:
-                        since_enter_text.append(transcribed_text)
+                        since_enter_text.append(txt)
                         # Also accumulate full session transcript with timestamp and label
                         try:
                             ts_label = datetime.now().strftime('%H:%M:%S')
                         except Exception:
                             ts_label = "" 
-                        session_text.append((ts_label, source_label, transcribed_text))
+                        session_text.append((ts_label, source_label, txt))
                     
                     # Print live transcription if not in enter_only mode
                     if not enter_only:
@@ -697,6 +921,89 @@ def main():
         help="Minimum fraction of voiced sub-frames to treat the window as speech (default: 0.2)"
     )
     parser.add_argument(
+        "--min-rms-gate-db",
+        type=float,
+        default=float(os.getenv("MIN_RMS_GATE_DB", "-45")),
+        help="Minimum overall RMS gate in dBFS. Below this, STT is skipped (default: -45)"
+    )
+    parser.add_argument(
+        "--postfilter-min-chars",
+        type=int,
+        default=int(os.getenv("POSTFILTER_MIN_CHARS", "3")),
+        help="Minimum content characters after stripping punctuation/emojis to keep a line (default: 3)"
+    )
+    parser.add_argument(
+        "--postfilter-min-words",
+        type=int,
+        default=int(os.getenv("POSTFILTER_MIN_WORDS", "1")),
+        help="Minimum number of words required to keep a line (default: 1)"
+    )
+    parser.add_argument(
+        "--postfilter-dedup-seconds",
+        type=float,
+        default=float(os.getenv("POSTFILTER_DEDUP_SECONDS", "5")),
+        help="Drop identical lines repeated within this many seconds (default: 5)"
+    )
+    parser.add_argument(
+        "--postfilter-drop-punct-only",
+        type=int,
+        choices=[0, 1],
+        default=int(os.getenv("POSTFILTER_DROP_PUNCT_ONLY", "1")),
+        help="Drop lines that are only punctuation/emojis: 1=on, 0=off (default: 1)"
+    )
+    parser.add_argument(
+        "--use-webrtc-vad",
+        action="store_true",
+        help="Use WebRTC VAD (if available) as an additional gate before STT"
+    )
+    parser.add_argument(
+        "--cross-suppress",
+        action="store_true" if os.getenv("CROSS_SUPPRESS", "1").strip().lower() in ("1", "true", "yes", "on") else "store_false",
+        help="Suppress quieter source when the other source is clearly dominant (default: on)"
+    )
+    parser.add_argument(
+        "--cross-suppress-rms-margin-db",
+        type=float,
+        default=float(os.getenv("CROSS_SUPPRESS_RMS_MARGIN_DB", "6")),
+        help="Margin in dB by which the other source must exceed to suppress this one (default: 6 dB)"
+    )
+    parser.add_argument(
+        "--cross-suppress-stale-sec",
+        type=float,
+        default=float(os.getenv("CROSS_SUPPRESS_STALE_SEC", "2.0")),
+        help="How recent the other source RMS must be to consider suppression (default: 2.0 s)"
+    )
+    parser.add_argument(
+        "--snr-gate-db",
+        type=float,
+        default=float(os.getenv("SNR_GATE_DB", "0")),
+        help="Minimum estimated SNR (dB) between speech and noise frames within the window to pass (default: 0)"
+    )
+    parser.add_argument(
+        "--postfilter-stopwords",
+        type=str,
+        default=os.getenv("POSTFILTER_STOPWORDS", "you,thanks,thank,you.,hi,hello,ok,okay"),
+        help="Comma-separated stopwords for single-word outputs to drop (default includes common fillers)"
+    )
+    parser.add_argument(
+        "--postfilter-allowed-scripts",
+        type=str,
+        default=os.getenv("POSTFILTER_ALLOWED_SCRIPTS", "latin,cyrillic"),
+        help="Comma-separated scripts to allow in outputs (latin,cyrillic). Empty means allow all"
+    )
+    parser.add_argument(
+        "--postfilter-similarity-threshold",
+        type=float,
+        default=float(os.getenv("POSTFILTER_SIMILARITY_THRESHOLD", "0.85")),
+        help="Similarity threshold (0-1) for approximate deduplication within dedup window (default: 0.85)"
+    )
+    parser.add_argument(
+        "--postfilter-banned-phrases",
+        type=str,
+        default=os.getenv("POSTFILTER_BANNED_PHRASES", "thank you for watching,thank you so much for watching"),
+        help="Comma-separated phrases to block if they appear (normalized substring match)"
+    )
+    parser.add_argument(
         "--save-on-exit",
         type=str,
         choices=["ask", "yes", "no"],
@@ -714,6 +1021,12 @@ def main():
         type=int,
         default=int(os.getenv("SAVE_AUDIO_SECONDS", "30")),
         help="Number of recent seconds of audio to save (default: 30)"
+    )
+    parser.add_argument(
+        "--buffer-session-seconds",
+        type=int,
+        default=(int(os.getenv("BUFFER_SESSION_SECONDS")) if os.getenv("BUFFER_SESSION_SECONDS") is not None else None),
+        help="Max seconds to keep in RAM for the session ring buffer; 0 = unlimited. If not set, defaults to the value of --save-audio-seconds."
     )
     parser.add_argument(
         "--save-audio-mode",
@@ -780,8 +1093,12 @@ def main():
         is_frozen = False
     if len(sys.argv) <= 1 and is_frozen:
         args.save_on_exit = "yes"
-        args.save_audio_seconds = 60
+        args.save_audio_seconds = 0
         args.save_audio_mode = "both"
+        try:
+            args.buffer_session_seconds = 0
+        except Exception:
+            pass
         if args.ui_opacity is None:
             # If UI_OPACITY provided in .env use it, else fallback to 85
             try:
@@ -936,13 +1253,19 @@ def main():
     enable_mic = bool(args.capture_mic and not args.no_mic)
     audio_listener = None
     mic_listener = None
+    # Determine effective session buffer depth in seconds for in-memory storage
+    try:
+        buffer_seconds_effective = args.buffer_session_seconds if args.buffer_session_seconds is not None else args.save_audio_seconds
+    except Exception:
+        buffer_seconds_effective = args.save_audio_seconds
+
     if enable_system:
         audio_listener = SystemAudioListener(
             samplerate=args.samplerate,
             use_wasapi_loopback=True,
             output_device=args.output_device,
             input_device_index=args.input_index,
-            max_session_seconds=int(args.save_audio_seconds)
+            max_session_seconds=int(buffer_seconds_effective)
         )
     if enable_mic:
         mic_listener = MicrophoneListener(
@@ -950,7 +1273,7 @@ def main():
             channels=int(args.mic_channels),
             input_device_name=args.mic_device,
             input_device_index=args.mic_index,
-            max_session_seconds=int(args.save_audio_seconds)
+            max_session_seconds=int(buffer_seconds_effective)
         )
     
     # Buffer for accumulating text since last Enter
@@ -982,6 +1305,20 @@ def main():
                     args.vad_threshold,
                     args.vad_frame_ms,
                     args.vad_min_voiced_ratio,
+                    args.min_rms_gate_db,
+                    args.postfilter_min_chars,
+                    args.postfilter_min_words,
+                    args.postfilter_dedup_seconds,
+                    bool(int(getattr(args, 'postfilter_drop_punct_only', 1))) if hasattr(args, 'postfilter_drop_punct_only') else True,
+                    args.use_webrtc_vad,
+                    args.cross_suppress,
+                    args.cross_suppress_rms_margin_db,
+                    args.cross_suppress_stale_sec,
+                    args.snr_gate_db,
+                    args.postfilter_stopwords,
+                    args.postfilter_allowed_scripts,
+                    args.postfilter_similarity_threshold,
+                    args.postfilter_banned_phrases,
                     since_enter_text,
                     since_enter_lock,
                     session_text,
@@ -1003,6 +1340,20 @@ def main():
                     args.vad_threshold,
                     args.vad_frame_ms,
                     args.vad_min_voiced_ratio,
+                    args.min_rms_gate_db,
+                    args.postfilter_min_chars,
+                    args.postfilter_min_words,
+                    args.postfilter_dedup_seconds,
+                    bool(int(getattr(args, 'postfilter_drop_punct_only', 1))) if hasattr(args, 'postfilter_drop_punct_only') else True,
+                    args.use_webrtc_vad,
+                    args.cross_suppress,
+                    args.cross_suppress_rms_margin_db,
+                    args.cross_suppress_stale_sec,
+                    args.snr_gate_db,
+                    args.postfilter_stopwords,
+                    args.postfilter_allowed_scripts,
+                    args.postfilter_similarity_threshold,
+                    args.postfilter_banned_phrases,
                     since_enter_text,
                     since_enter_lock,
                     session_text,

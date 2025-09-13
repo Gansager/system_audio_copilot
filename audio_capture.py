@@ -723,12 +723,20 @@ class SystemAudioListener:
             numpy.ndarray: Audio data in float32 format, mono, sampled at self.samplerate.
         """
         try:
-            req_seconds = max(0, int(seconds))
+            req_seconds = int(seconds)
         except Exception:
             req_seconds = 0
 
+        # When req_seconds <= 0, return the entire session audio
         if req_seconds <= 0:
-            return np.array([], dtype=np.float32)
+            with self.lock:
+                if not self.session_ring_buffer:
+                    return np.array([], dtype=np.float32)
+                sel = self.session_ring_buffer[:]
+            try:
+                return np.concatenate(sel, axis=0) if len(sel) > 0 else np.array([], dtype=np.float32)
+            except Exception:
+                return np.array([], dtype=np.float32)
 
         with self.lock:
             if not self.session_ring_buffer:
