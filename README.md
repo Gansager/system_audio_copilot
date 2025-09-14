@@ -86,6 +86,10 @@ python main.py --help
  - `--save-dir PATH` - Directory for saved sessions (default: `./sessions`)
  - `--save-audio-seconds INT` - Recent audio seconds to save (default: `30`)
  - `--save-audio-mode {separate,mix,both}` - Save separate files, mixed, or both (default: `separate`)
+ - `--autosave-transcript-seconds FLOAT` - Autosave transcript every N seconds (default: 5)
+ - `--summary-timeout-seconds FLOAT` - Max seconds to wait for summary at shutdown (default: 4)
+  - `--allowed-languages CSV` - Allowed languages for STT/AI (default: ru,en,de,uk)
+  - `--banned-phrases CSV` - Phrases to block (case-insensitive substring)
 
 ### Examples
 

@@ -55,7 +55,7 @@ def write_wav_file(path: str, audio_f32: np.ndarray, sr: int) -> None:
     sf.write(path, audio_int16, sr, format='WAV', subtype='PCM_16')
 
 
-def transcribe_wav_bytes(wav_bytes: bytes, client: OpenAI, model: str = "whisper-1") -> str:
+def transcribe_wav_bytes(wav_bytes: bytes, client: OpenAI, model: str = "whisper-1", language: Optional[str] = None) -> str:
     """
     Transcribe WAV bytes via the OpenAI Whisper API.
     
@@ -76,11 +76,19 @@ def transcribe_wav_bytes(wav_bytes: bytes, client: OpenAI, model: str = "whisper
         audio_file.name = "audio.wav"
         
         # Send for transcription
-        response = client.audio.transcriptions.create(
-            model=model,
-            file=audio_file,
-            response_format="text"
-        )
+        if language:
+            response = client.audio.transcriptions.create(
+                model=model,
+                file=audio_file,
+                response_format="text",
+                language=str(language)
+            )
+        else:
+            response = client.audio.transcriptions.create(
+                model=model,
+                file=audio_file,
+                response_format="text"
+            )
         
         # Return stripped text
         return response.strip() if response else ""
@@ -90,7 +98,7 @@ def transcribe_wav_bytes(wav_bytes: bytes, client: OpenAI, model: str = "whisper
         return ""
 
 
-def transcribe_audio_chunk(audio_f32: np.ndarray, sr: int, client: OpenAI, model: str = "whisper-1") -> str:
+def transcribe_audio_chunk(audio_f32: np.ndarray, sr: int, client: OpenAI, model: str = "whisper-1", language: Optional[str] = None) -> str:
     """
     Transcribe an audio chunk (full pipeline).
     
@@ -113,4 +121,4 @@ def transcribe_audio_chunk(audio_f32: np.ndarray, sr: int, client: OpenAI, model
         return ""
     
     # Transcribe
-    return transcribe_wav_bytes(wav_bytes, client, model)
+    return transcribe_wav_bytes(wav_bytes, client, model, language)

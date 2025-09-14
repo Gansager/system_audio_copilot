@@ -23,6 +23,72 @@ from stt import transcribe_audio_chunk
 from llm import make_hint, DEFAULT_SYSTEM_PROMPT, DEFAULT_SUMMARY_SYSTEM_PROMPT, make_summary
 
 
+def filter_allowed_text(text: str, allowed_langs: list) -> str:
+    """
+    Keep only characters belonging to allowed language sets (RU/UK Cyrillic; EN/DE Latin with äöüÄÖÜß),
+    plus common punctuation and spaces. If <80% of letters are from allowed sets, drop entirely.
+    """
+    try:
+        if not text:
+            return ""
+        allowed_langs = [str(l).strip().lower() for l in (allowed_langs or [])]
+        # If empty, default to ru,en,de,uk
+        if not allowed_langs:
+            allowed_langs = ["ru", "en", "de", "uk"]
+        cyr_ok = lambda cp: (0x0400 <= cp <= 0x04FF) or (cp in (0x0401, 0x0451))
+        de_diacritics = set("äöüÄÖÜß")
+        allowed_chars = []
+        allowed_count = 0
+        total_letters = 0
+        found_other_latin_diacritic = False
+        for ch in text:
+            cp = ord(ch)
+            if ch.isalpha():
+                total_letters += 1
+                if ('ru' in allowed_langs or 'uk' in allowed_langs) and cyr_ok(cp):
+                    allowed_chars.append(ch)
+                    allowed_count += 1
+                elif ('en' in allowed_langs or 'de' in allowed_langs):
+                    if ('de' in allowed_langs and ch in de_diacritics) or ('a' <= ch.lower() <= 'z'):
+                        allowed_chars.append(ch)
+                        allowed_count += 1
+                    else:
+                        # Any other alphabetic character in EN/DE mode (e.g., Latin with other diacritics)
+                        # causes the entire string to be dropped.
+                        found_other_latin_diacritic = True
+                        continue
+                else:
+                    continue
+            elif ch.isspace() or ch in ",.;:!?-()[]{}'\"/\\":
+                allowed_chars.append(ch)
+            else:
+                continue
+        if found_other_latin_diacritic:
+            return ""
+        if total_letters > 0 and (allowed_count / float(total_letters)) < 0.8:
+            return ""
+        return "".join(allowed_chars).strip()
+    except Exception:
+        return ""
+
+
+def text_is_banned(text: str, config: dict) -> bool:
+    """Return True if text matches any banned phrase per config (case-insensitive substring after normalization)."""
+    try:
+        banned_norm = config.get("_banned_norm")
+        if not text or not banned_norm:
+            return False
+        import re as _re
+        norm = text.lower()
+        norm = _re.sub(r"[^0-9A-Za-zА-Яа-яЁёäöüÄÖÜß]+", "", norm)
+        for pat in banned_norm:
+            if pat and pat in norm:
+                return True
+        return False
+    except Exception:
+        return False
+
+
 def load_config():
     """Load configuration from .env located next to the executable/script."""
     # Determine the directory to search for .env
@@ -123,25 +189,55 @@ def live_transcription_worker(
                     # Skip silent/low-voicing windows entirely
                     continue
                 # Transcribe
+                # Force language for Whisper if only one allowed language is configured
+                forced_lang = None
+                try:
+                    if isinstance(config.get("allowed_languages"), list) and len(config["allowed_languages"]) == 1:
+                        lang = config["allowed_languages"][0]
+                        if lang in ("ru", "en", "de", "uk"):
+                            forced_lang = lang
+                except Exception:
+                    forced_lang = None
+
                 transcribed_text = transcribe_audio_chunk(
                     audio_chunk, 
                     audio_listener.samplerate, 
                     client, 
-                    config["model_transcribe"]
+                    config["model_transcribe"],
+                    forced_lang
                 )
                 
                 if transcribed_text:
+                    # Filter by allowed languages
+                    try:
+                        filtered = filter_allowed_text(str(transcribed_text), config.get("allowed_languages", ["ru","en","de","uk"]))
+                    except Exception:
+                        filtered = ""
+                    if not filtered:
+                        try:
+                            print("[info] Text ignored (disallowed language)", file=sys.stderr)
+                        except Exception:
+                            pass
+                        continue
+                    # Banlist check (after language filter)
+                    try:
+                        if text_is_banned(filtered, config):
+                            if config.get("dev_logs"):
+                                print("[info] Text ignored (banned phrase)", file=sys.stderr)
+                            continue
+                    except Exception:
+                        pass
                     # Add to buffer for Enter
                     with since_enter_lock:
-                        since_enter_text.append(transcribed_text)
+                        since_enter_text.append(filtered)
                         # Also accumulate full session transcript with timestamp and label
                         try:
                             ts_label = datetime.now().strftime('%H:%M:%S')
                         except Exception:
                             ts_label = "" 
-                        session_text.append((ts_label, source_label, transcribed_text))
+                        session_text.append((ts_label, source_label, filtered))
                     
-                    # Print live transcription if not in enter_only mode
+                    # Print live transcription if not in enter_only mode (print filtered text)
                     if not enter_only:
                         use_color = bool(config.get("use_color", False))
                         colors = config.get("colors", {}) if isinstance(config.get("colors", {}), dict) else {}
@@ -157,7 +253,7 @@ def live_transcription_worker(
                                 c = colors.get("me", "")
                                 r = colors.get("reset", "")
                                 prefix = f"{c}[Me]{r}"
-                        print(f"{prefix} {transcribed_text}")
+                        print(f"{prefix} {filtered}")
                         sys.stdout.flush()
                         
         except Exception as e:
@@ -201,8 +297,24 @@ def handle_enter_input(
     print(f"[sending] Sending text: {full_text}")
     
     # Get a hint from AI
+    # Filter text by allowed languages before sending to LLM, then apply banlist
+    try:
+        filtered_text = filter_allowed_text(full_text, config.get("allowed_languages", ["ru","en","de","uk"]))
+    except Exception:
+        filtered_text = full_text
+    try:
+        if text_is_banned(filtered_text, config):
+            if config.get("dev_logs"):
+                print("[info] Hint skipped: banned phrase", file=sys.stderr)
+            return
+    except Exception:
+        pass
+    if not filtered_text.strip():
+        if config.get("dev_logs"):
+            print("[info] Hint skipped: disallowed language/content", file=sys.stderr)
+        return
     hint = make_hint(
-        full_text,
+        filtered_text,
         client,
         config["model_hints"],
         config["temperature"],
@@ -244,7 +356,9 @@ def prompt_and_save_session(
     mix_max_gain_db: float,
     mix_min_gain_db: float,
     mix_rms_gate_db: float,
-    session_start_ts: float
+    session_start_ts: float,
+    override_session_dir: Optional[str] = None,
+    summary_timeout_seconds: Optional[float] = None
 ) -> None:
     """
     Prompt user and save session (audio + text) depending on mode.
@@ -281,34 +395,44 @@ def prompt_and_save_session(
     if not should_save:
         return
 
-    # Determine base dir for relative save_dir
-    base_dir = None
-    try:
-        if getattr(sys, 'frozen', False):
-            base_dir = os.path.dirname(sys.executable)
-        else:
-            base_dir = os.getcwd()
-    except Exception:
-        base_dir = os.getcwd()
-
-    save_dir_cfg = save_dir_opt or "./sessions"
-    if os.path.isabs(save_dir_cfg):
-        sessions_root = save_dir_cfg
+    # Resolve or create session directory
+    if override_session_dir and isinstance(override_session_dir, str) and len(override_session_dir) > 0:
+        session_dir = override_session_dir
+        now_ts = time.time()
+        start_dt = datetime.fromtimestamp(session_start_ts)
+        end_dt = datetime.fromtimestamp(now_ts)
+        try:
+            os.makedirs(session_dir, exist_ok=True)
+        except Exception:
+            pass
     else:
-        sessions_root = os.path.join(base_dir, save_dir_cfg)
+        # Determine base dir for relative save_dir
+        base_dir = None
+        try:
+            if getattr(sys, 'frozen', False):
+                base_dir = os.path.dirname(sys.executable)
+            else:
+                base_dir = os.getcwd()
+        except Exception:
+            base_dir = os.getcwd()
 
-    # Create timestamped session folder
-    now_ts = time.time()
-    start_dt = datetime.fromtimestamp(session_start_ts)
-    end_dt = datetime.fromtimestamp(now_ts)
-    session_folder_name = end_dt.strftime("%Y-%m-%d_%H%M%S")
-    session_dir = os.path.join(sessions_root, session_folder_name)
+        save_dir_cfg = save_dir_opt or "./sessions"
+        if os.path.isabs(save_dir_cfg):
+            sessions_root = save_dir_cfg
+        else:
+            sessions_root = os.path.join(base_dir, save_dir_cfg)
 
-    try:
-        os.makedirs(session_dir, exist_ok=True)
-    except Exception as e:
-        print(f"[warning] Failed to create session directory: {e}", file=sys.stderr)
-        return
+        now_ts = time.time()
+        start_dt = datetime.fromtimestamp(session_start_ts)
+        end_dt = datetime.fromtimestamp(now_ts)
+        session_folder_name = end_dt.strftime("%Y-%m-%d_%H%M%S")
+        session_dir = os.path.join(sessions_root, session_folder_name)
+
+        try:
+            os.makedirs(session_dir, exist_ok=True)
+        except Exception as e:
+            print(f"[warning] Failed to create session directory: {e}", file=sys.stderr)
+            return
 
     # Save audio: last N seconds from both sources
     save_mode = (save_audio_mode or "mix").strip().lower()
@@ -500,18 +624,43 @@ def prompt_and_save_session(
     except Exception:
         source_text = ""
 
+    # Filter source text for summary
+    try:
+        filtered_source_text = filter_allowed_text(source_text, config.get("allowed_languages", ["ru","en","de","uk"]))
+    except Exception:
+        filtered_source_text = source_text
     summary_text = ""
-    if client is not None and config is not None and source_text.strip():
+    if client is not None and config is not None and filtered_source_text.strip():
+        # Banlist check for summary source
         try:
-            summary_text = make_summary(
-                transcript_text=source_text,
-                client=client,
-                model=config.get("model_hints", "gpt-4o-mini"),
-                temperature=float(config.get("temperature", 0.2)),
-                system_prompt=config.get("assistant_summary_prompt"),
-            )
-        except Exception as e:
-            print(f"[warning] Summary generation error: {e}", file=sys.stderr)
+            if text_is_banned(filtered_source_text, config):
+                filtered_source_text = ""
+        except Exception:
+            pass
+    if client is not None and config is not None and filtered_source_text.strip():
+        def _gen_summary(out_ref: dict):
+            try:
+                out_ref["summary"] = make_summary(
+                    transcript_text=filtered_source_text,
+                    client=client,
+                    model=config.get("model_hints", "gpt-4o-mini"),
+                    temperature=float(config.get("temperature", 0.2)),
+                    system_prompt=config.get("assistant_summary_prompt"),
+                )
+            except Exception as e:
+                print(f"[warning] Summary generation error: {e}", file=sys.stderr)
+        try:
+            out = {"summary": ""}
+            t_sum = threading.Thread(target=_gen_summary, args=(out,), daemon=True)
+            t_sum.start()
+            timeout_s = float(summary_timeout_seconds) if summary_timeout_seconds is not None else 0.0
+            if timeout_s > 0:
+                t_sum.join(timeout=timeout_s)
+            else:
+                t_sum.join()
+            summary_text = str(out.get("summary", "") or "").strip()
+        except Exception:
+            summary_text = ""
     try:
         with open(transcript_path, 'w', encoding='utf-8') as f:
             f.write("System Audio Copilot Session\n")
@@ -753,6 +902,19 @@ def main():
         default=float(os.getenv("MIX_RMS_GATE_DB", "-60")),
         help="Do not boost sources with RMS below this (noise gate) (default: -60)"
     )
+    # Autosave and summary timeouts
+    parser.add_argument(
+        "--autosave-transcript-seconds",
+        type=float,
+        default=float(os.getenv("AUTOSAVE_TRANSCRIPT_SECONDS", "5")),
+        help="Interval in seconds to autosave transcript during the session (default: 5)"
+    )
+    parser.add_argument(
+        "--summary-timeout-seconds",
+        type=float,
+        default=float(os.getenv("SUMMARY_TIMEOUT_SECONDS", "4")),
+        help="Maximum seconds to wait for summary generation at shutdown (default: 4)"
+    )
     # UI flags
     parser.add_argument(
         "--ui-opacity",
@@ -769,6 +931,18 @@ def main():
         "--no-color",
         action="store_true",
         help="Disable ANSI colors in output"
+    )
+    parser.add_argument(
+        "--allowed-languages",
+        type=str,
+        default=os.getenv("ALLOWED_LANGUAGES", "ru,en,de,uk"),
+        help="Comma-separated allowed languages (ISO-639-1): ru,en,de,uk (default: ru,en,de,uk)"
+    )
+    parser.add_argument(
+        "--banned-phrases",
+        type=str,
+        default=os.getenv("BANNED_PHRASES", os.getenv("POSTFILTER_BANNED_PHRASES", "")),
+        help="Comma-separated phrases to block (case-insensitive substring). Overrides env"
     )
     
     args = parser.parse_args()
@@ -876,6 +1050,44 @@ def main():
         pass
 
     print(f"[info] Press Enter for an AI hint, Ctrl+C to exit", file=sys.stderr)
+    # Build allowed languages config and helpers
+    try:
+        allowed_langs = [s.strip().lower() for s in str(args.allowed_languages).split(',') if s.strip()]
+    except Exception:
+        allowed_langs = ["ru", "en", "de", "uk"]
+    config["allowed_languages"] = allowed_langs
+
+    # Banned phrases list (normalized to comparable lowercase without extra spaces)
+    def _normalize_for_match(s: str) -> str:
+        try:
+            import re as _re
+            s = s.lower()
+            s = _re.sub(r"[^0-9A-Za-zА-Яа-яЁёäöüÄÖÜß]+", "", s)
+            return s
+        except Exception:
+            return s.strip().lower()
+    try:
+        banned_csv = str(getattr(args, 'banned_phrases', '') or '')
+    except Exception:
+        banned_csv = ''
+    banned_list_raw = [p.strip() for p in banned_csv.split(',') if p.strip()]
+    config["banned_phrases"] = banned_list_raw
+    config["_banned_norm"] = [_normalize_for_match(p) for p in banned_list_raw]
+
+    def is_banned_text(text: str) -> bool:  # type: ignore
+        try:
+            if not text or not config.get("_banned_norm"):
+                return False
+            norm = _normalize_for_match(text)
+            for pat in config["_banned_norm"]:
+                if pat and pat in norm:
+                    return True
+            return False
+        except Exception:
+            return False
+
+    def _filter_allowed_text(txt: str) -> str:
+        return filter_allowed_text(txt, allowed_langs)
     print("=" * 60, file=sys.stderr)
     
     # Shutdown coordination flags
@@ -925,6 +1137,8 @@ def main():
                         mix_min_gain_db=float(args.mix_min_gain_db),
                         mix_rms_gate_db=float(args.mix_rms_gate_db),
                         session_start_ts=session_start_ts,
+                        override_session_dir=pre_session_dir,
+                        summary_timeout_seconds=float(getattr(args, 'summary_timeout_seconds', 4.0) or 4.0),
                     )
                 except Exception as e:
                     print(f"[warning] Failed to save session during shutdown: {e}", file=sys.stderr)
@@ -960,6 +1174,111 @@ def main():
     session_text = []
     session_hints = []
     session_start_ts = time.time()
+    # Pre-create session directory and autosave transcript periodically
+    # Resolve sessions root
+    base_dir = None
+    try:
+        if getattr(sys, 'frozen', False):
+            base_dir = os.path.dirname(sys.executable)
+        else:
+            base_dir = os.getcwd()
+    except Exception:
+        base_dir = os.getcwd()
+    save_dir_cfg = str(args.save_dir) if args.save_dir else "./sessions"
+    sessions_root = save_dir_cfg if os.path.isabs(save_dir_cfg) else os.path.join(base_dir, save_dir_cfg)
+    # Pre-create folder by start time
+    start_dt_pre = datetime.fromtimestamp(session_start_ts)
+    session_folder_name_pre = start_dt_pre.strftime("%Y-%m-%d_%H%M%S")
+    pre_session_dir = os.path.join(sessions_root, session_folder_name_pre)
+    try:
+        os.makedirs(pre_session_dir, exist_ok=True)
+    except Exception:
+        pass
+
+    autosave_stop = threading.Event()
+    def _autosave_loop():
+        interval = float(getattr(args, 'autosave_transcript_seconds', 5.0) or 5.0)
+        while not autosave_stop.is_set():
+            try:
+                time.sleep(max(1.0, interval))
+                # Minimal transcript flush without summary
+                now_ts = time.time()
+                start_dt = datetime.fromtimestamp(session_start_ts)
+                end_dt = datetime.fromtimestamp(now_ts)
+                transcript_path = os.path.join(pre_session_dir, "transcript.txt")
+                # Snapshot data under lock for consistency
+                lines = []
+                hints_snapshot = []
+                try:
+                    # No single lock protects session_text; iterate best-effort
+                    for item in list(session_text):
+                        try:
+                            if isinstance(item, (tuple, list)) and len(item) >= 3:
+                                tstr = str(item[0]).strip()
+                                src = str(item[1]).strip().lower()
+                                txt = str(item[2]).strip()
+                                label = "Me" if src in ("mic", "me") else ("Other" if src in ("system", "other") else "")
+                                if label:
+                                    lines.append(f"[{tstr}] [{label}] {txt}")
+                                else:
+                                    lines.append(f"[{tstr}] {txt}")
+                            else:
+                                lines.append(str(item).strip())
+                        except Exception:
+                            pass
+                    for pair in list(session_hints)[-10:]:
+                        try:
+                            u, a = pair
+                            hints_snapshot.append((str(u), str(a)))
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
+                # Write atomically
+                try:
+                    tmp_path = transcript_path + ".tmp"
+                    with open(tmp_path, 'w', encoding='utf-8') as f:
+                        f.write("System Audio Copilot Session\n")
+                        f.write("==============================\n\n")
+                        f.write(f"Start: {start_dt.isoformat()}\n")
+                        f.write(f"End:   {end_dt.isoformat()}\n")
+                        f.write(f"System sample rate: n/a\n")
+                        f.write(f"Mic sample rate: n/a\n")
+                        try:
+                            f.write(f"Saved audio seconds: {int(args.save_audio_seconds)}\n")
+                        except Exception:
+                            f.write("Saved audio seconds: n/a\n")
+                        f.write("\n")
+                        f.write("Transcript\n")
+                        f.write("----------\n")
+                        if lines:
+                            for ln in lines:
+                                try:
+                                    f.write(ln + "\n")
+                                except Exception:
+                                    pass
+                        else:
+                            f.write("(no transcribed text)\n")
+                        f.write("\n")
+                        f.write("Assistant\n")
+                        f.write("---------\n")
+                        if hints_snapshot:
+                            for u, a in hints_snapshot:
+                                try:
+                                    f.write("USER: " + u.strip() + "\n")
+                                    f.write("ASSISTANT: " + a.strip() + "\n")
+                                    f.write("-" * 20 + "\n")
+                                except Exception:
+                                    pass
+                        else:
+                            f.write("(no assistant interactions)\n")
+                    os.replace(tmp_path, transcript_path)
+                except Exception:
+                    pass
+            except Exception:
+                pass
+
+    threading.Thread(target=_autosave_loop, daemon=True).start()
     
     try:
         # Start audio recording
@@ -1105,6 +1424,10 @@ def main():
             graceful_shutdown("finally", force_yes=False)
         except Exception as e:
             print(f"[warning] Shutdown error: {e}", file=sys.stderr)
+        try:
+            autosave_stop.set()
+        except Exception:
+            pass
         print("[info] Application finished", file=sys.stderr)
 
 

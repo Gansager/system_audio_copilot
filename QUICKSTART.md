@@ -78,6 +78,15 @@ python main.py --no-mic
 
 # Save mixed audio too
 python main.py --save-on-exit yes --save-audio-mode both
+
+# Reduce hallucinations on silence
+python main.py --min-rms-gate-db -45 --snr-gate-db 3 --postfilter-min-chars 3 --postfilter-min-words 2 --postfilter-dedup-seconds 10 --postfilter-drop-punct-only 1 --cross-suppress --cross-suppress-rms-margin-db 8 --postfilter-stopwords "you,thanks,thank,ok,okay,hello,hi" --postfilter-similarity-threshold 0.9 --postfilter-banned-phrases "thank you for watching,thank you so much for watching"
+
+# Guarantee transcript on window close (autosave every 5s, summary timeout 4s)
+python main.py --autosave-transcript-seconds 5 --summary-timeout-seconds 4
+
+# Allow only RU/EN/DE/UK and block common spam phrases
+python main.py --allowed-languages ru,en,de,uk --banned-phrases "thank you so much for watching,thank you for watching,субтитры добавил dimatorzok"
 ```
 
 ## ⚠️ Important notes

@@ -9,11 +9,12 @@ from typing import Optional
 
 DEFAULT_SYSTEM_PROMPT = (
     "You are a helpful AI assistant. Give a brief, confident suggestion "
-    "(1-2 sentences), no fluff or apologies. Answer in English."
+    "(1-2 sentences), no fluff or apologies. Answer only in Russian, English, German, or Ukrainian. "
+    "Ignore and do not use texts in other languages."
 )
 
 DEFAULT_SUMMARY_SYSTEM_PROMPT = (
-    "You are a facilitator. Summarize the meeting briefly and to the point, in the language of the meeting."
+    "You are a facilitator. Summarize briefly and to the point, using only Russian, English, German, or Ukrainian."
     " First 1-2 sentences: what the meeting was about (no fluff). Then a list of 3-8 key points: decisions, questions, next steps."
     " Don't add preambles like 'Here's a quick summary'. Use '-' markers for points."
 )
