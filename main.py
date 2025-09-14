@@ -21,6 +21,10 @@ import signal
 from audio_capture import SystemAudioListener, MicrophoneListener
 from stt import transcribe_audio_chunk
 from llm import make_hint, DEFAULT_SYSTEM_PROMPT, DEFAULT_SUMMARY_SYSTEM_PROMPT, make_summary
+try:
+    from version import __version__ as APP_VERSION
+except Exception:
+    APP_VERSION = "1.2.3"
 
 
 def filter_allowed_text(text: str, allowed_langs: list) -> str:
@@ -675,6 +679,7 @@ def prompt_and_save_session(
                 mic_sr_str = (str(mic_sr) + " Hz") if mic_sr is not None else "n/a"
             except Exception:
                 mic_sr_str = "n/a"
+            f.write(f"App version: {APP_VERSION}\n")
             f.write(f"System sample rate: {sys_sr_str}\n")
             f.write(f"Mic sample rate: {mic_sr_str}\n")
             f.write(f"Saved audio seconds: {int(save_audio_seconds)}\n")
@@ -750,6 +755,11 @@ def main():
     """Main entry point of the application."""
     parser = argparse.ArgumentParser(
         description="System Audio Copilot - live transcription of system audio with AI hints"
+    )
+    parser.add_argument(
+        "--version",
+        action="store_true",
+        help="Print application version and exit"
     )
     parser.add_argument(
         "--window-sec",
@@ -946,6 +956,11 @@ def main():
     )
     
     args = parser.parse_args()
+
+    # --version: print and exit
+    if getattr(args, 'version', False):
+        print(APP_VERSION)
+        return
     
     # Apply defaults when double-clicking the packaged .exe (no CLI args)
     try:
@@ -1033,7 +1048,7 @@ def main():
         except Exception:
             pass
     
-    print(f"[info] Starting System Audio Copilot", file=sys.stderr)
+    print(f"[info] Starting System Audio Copilot (version {APP_VERSION})", file=sys.stderr)
     print(f"[info] Transcription interval: {args.window_sec} s", file=sys.stderr)
     print(f"[info] Sample rate: {args.samplerate} Hz", file=sys.stderr)
     print(f"[info] Mode: {'enter-only' if args.enter_only else 'live transcription'}", file=sys.stderr)

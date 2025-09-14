@@ -15,6 +15,18 @@ pip install --upgrade pip
 pip install -r requirements.txt
 pip install "pyinstaller>=6.6" pyinstaller-hooks-contrib
 
+rem --- Derive version and generate version.py ---
+set VERSION_FILE=version.py
+set DEFAULT_VERSION=1.2.3
+set EFFECTIVE_VERSION=%DEFAULT_VERSION%
+if not "%VERSION%"=="" (
+  set EFFECTIVE_VERSION=%VERSION%
+) else (
+  for /f "usebackq delims=" %%i in (`git describe --tags --abbrev=0 2^>NUL`) do set EFFECTIVE_VERSION=%%i
+)
+echo [info] App version: %EFFECTIVE_VERSION%
+echo __version__ = "%EFFECTIVE_VERSION%" > %VERSION_FILE%
+
 echo [info] Building exe...
 pyinstaller --noconfirm --onefile --console ^
   --name SystemAudioCopilot ^
@@ -23,6 +35,7 @@ pyinstaller --noconfirm --onefile --console ^
   --collect-data soundfile ^
   --hidden-import sounddevice ^
   --hidden-import pyaudiowpatch ^
+  --icon "assets\app.ico" ^
   main.py
 
 echo.
